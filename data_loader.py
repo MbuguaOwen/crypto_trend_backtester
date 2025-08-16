@@ -3,6 +3,7 @@ import os, glob
 from typing import List, Optional
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 QTY_ALIASES = ["qty","quantity","amount","size","vol","volume","q","trade_quantity","last_qty"]
 QUOTE_QTY_ALIASES = ["quote_qty","quoteQuantity","qv","amount_quote","notional","quoteVolume","quote_vol"]
@@ -30,8 +31,12 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
         raise FileNotFoundError(f"No CSV files found under {path}")
 
     parts = []
-    for f in files:
-        df = pd.read_csv(f)
+    for f in tqdm(files, desc=f"[{symbol}] Loading CSVs", unit="file", dynamic_ncols=True):
+        # Try a faster engine if present, fallback gracefully
+        try:
+            df = pd.read_csv(f, engine="pyarrow")
+        except Exception:
+            df = pd.read_csv(f, low_memory=False)
         cols = list(df.columns)
         tcol = _find_col(cols, TIME_ALIASES)
         pcol = _find_col(cols, PRICE_ALIASES)
@@ -87,11 +92,11 @@ def build_minute_bars(ticks: pd.DataFrame, interval: str = "1min") -> pd.DataFra
     df["ts_dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     df = df.set_index("ts_dt")
 
-    o = df["price"].resample("1min").first()
-    h = df["price"].resample("1min").max()
-    l = df["price"].resample("1min").min()
-    c = df["price"].resample("1min").last()
-    v = df["qty"].resample("1min").sum()
+    o = df["price"].resample(interval).first()
+    h = df["price"].resample(interval).max()
+    l = df["price"].resample(interval).min()
+    c = df["price"].resample(interval).last()
+    v = df["qty"].resample(interval).sum()
 
     out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
     out = out.reset_index()

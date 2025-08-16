@@ -6,3 +6,5 @@ matplotlib>=3.7
 tqdm>=4.66
 PyYAML>=6.0
 ujson>=5.9
+# Optional (faster CSV reads if available)
+# pyarrow>=14.0

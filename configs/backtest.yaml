@@ -1,29 +1,15 @@
 data:
   data_dir: ./data
-  symbols:
-  - BTCUSDT
-  - ETHUSDT
-  - SOLUSDT
-  months:
-  - 2025-01
-  - 2025-02
-  - 2025-03
-  - 2025-04
-  - 2025-05
-  - 2025-06
-  - 2025-07
+  symbols: [BTCUSDT]
+  months: ["2025-01"]
   resample_interval: 1min
 broker:
-  initial_capital: 100000.0
-  taker_fee_bps: 7.5
-  slippage_bps: 1.5
-  latency_ms: 500
+  initial_capital: 100000
+  taker_fee_bps: 1.0
+  slippage_bps: 0.5
+  latency_ms: 50
 strategy:
-  momentum_windows:
-  - 60
-  - 240
-  - 720
-  - 1440
+  momentum_windows: [60, 240, 720, 1440]
   breakout_lookback: 300
   vol_window: 1440
   target_vol_annual: 0.3
