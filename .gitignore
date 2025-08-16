@@ -1,13 +1,20 @@
-.venv/
-*.venv/
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.so
-*.csv
-*.egg-info/
+*.py[cod]
+*.ipynb_checkpoints/
+
+# Virtual envs
+venv/
+.venv/
+
+# OS / IDE
 .DS_Store
-results/
+.vscode/
+.idea/
+
+# Project artifacts
 data/
-EOT
+results/
+*.csv
+*.parquet
+charts/
