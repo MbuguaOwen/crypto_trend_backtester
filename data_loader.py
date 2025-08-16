@@ -3,6 +3,8 @@ from typing import List, Optional
 import pandas as pd
 from tqdm import tqdm
 
+pd.options.mode.copy_on_write = True
+
 QTY_ALIASES = ["qty","quantity","amount","size","vol","volume","q","trade_quantity","last_qty"]
 QUOTE_QTY_ALIASES = ["quote_qty","quoteQuantity","qv","amount_quote","notional","quoteVolume","quote_vol"]
 PRICE_ALIASES = ["price","p","last_price","rate"]
@@ -56,12 +58,29 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
             usecols.append(mcol)
 
         # 2) Stream the file in chunks to show progress
-        #    Prefer the default C engine for chunking (pyarrow sometimes returns a full DataFrame).
+        dtype_map = {pcol: "float64"}
+        if qcol is not None:
+            dtype_map[qcol] = "float64"
+        if qqcol is not None:
+            dtype_map[qqcol] = "float64"
         try:
-            it = pd.read_csv(f, usecols=usecols, chunksize=2_000_000)  # no engine→C engine, chunked
+            it = pd.read_csv(
+                f,
+                usecols=usecols,
+                chunksize=5_000_000,
+                memory_map=True,
+                dtype=dtype_map,
+                low_memory=False,
+            )
         except Exception:
             # very old pandas fallback
-            it = pd.read_csv(f, usecols=usecols, chunksize=2_000_000, low_memory=False)
+            it = pd.read_csv(
+                f,
+                usecols=usecols,
+                chunksize=5_000_000,
+                memory_map=True,
+                low_memory=False,
+            )
 
         buf = []
         # per-file row counter at position=2
@@ -87,8 +106,8 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
                 ts_len = int(df["ts"].dropna().astype(str).str.len().median()) if df["ts"].notna().any() else 13
                 if ts_len <= 10:
                     df["ts"] = (df["ts"] * 1000).astype("Int64")
-                df["price"] = pd.to_numeric(df["price"], errors="coerce")
-                df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+                df["price"] = pd.to_numeric(df["price"], errors="coerce").astype("float64")
+                df["qty"] = pd.to_numeric(df["qty"], errors="coerce").astype("float32")
 
                 df = df.dropna(subset=["ts","price","qty"])
                 df = df[(df["price"] > 0) & (df["qty"] >= 0)]
@@ -117,29 +136,14 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
 def build_minute_bars(ticks: pd.DataFrame, interval: str = "1min") -> pd.DataFrame:
     if ticks.empty:
         return ticks
-
     df = ticks.copy()
     df["ts_dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-
-    # Resample by day for visible progress
-    df["day"] = df["ts_dt"].dt.normalize()
-    bars = []
-    for day, g in tqdm(df.groupby("day"), desc="[Bars] Resampling by day", unit="day", dynamic_ncols=True, leave=False, position=2):
-        g = g.set_index("ts_dt")
-        o = g["price"].resample(interval).first()
-        h = g["price"].resample(interval).max()
-        l = g["price"].resample(interval).min()
-        c = g["price"].resample(interval).last()
-        v = g["qty"].resample(interval).sum()
-        out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
-        if not out.empty:
-            out["day"] = day
-            bars.append(out)
-
-    if not bars:
-        return pd.DataFrame(columns=["ts","open","high","low","close","volume"])
-
-    out = pd.concat(bars).reset_index()
+    df = df.set_index("ts_dt")
+    o = df["price"].resample(interval).first()
+    h = df["price"].resample(interval).max()
+    l = df["price"].resample(interval).min()
+    c = df["price"].resample(interval).last()
+    v = df["qty"].resample(interval).sum()
+    out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna().reset_index()
     out["ts"] = (out["ts_dt"].view("int64") // 1_000_000).astype("int64")
-    out = out.drop(columns=["ts_dt","day"]).sort_values("ts").reset_index(drop=True)
     return out[["ts","open","high","low","close","volume"]]
