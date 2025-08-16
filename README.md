@@ -28,7 +28,8 @@ backtester/
     __init__.py
     math.py
     time.py
-backtest_multi_horizon.py
+backtests/
+  parity_backtest.py
 data_loader.py
 strategy.py
 configs/
@@ -141,6 +142,20 @@ You’ll see progress bars for loading and simulation. Outputs:
 Therefore, no `KeyError` occurs; if essential fields are missing, the loader raises a **clear, actionable ValueError** with context.
 
 ---
+
+
+## 🎯 Parity Backtest
+
+A discrete-trade backtester that mirrors the live engine. Example usage:
+
+```bash
+python -m backtests.parity_backtest \
+  --config config.yaml \
+  --symbol BTCUSDT \
+  --data_1m_csv data/BTCUSDT_1m.csv \
+  --out trades_parity.csv \
+  --equity_usd 10000
+```
 
 ## 🧪 Notes
 
