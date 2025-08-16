@@ -1,28 +1,44 @@
-from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Dict
 
-import numpy as np
-import pandas as pd
+@dataclass
+class Position:
+    qty: float = 0.0
+    entry_price: float = 0.0
 
+@dataclass
+class Portfolio:
+    cash: float
+    positions: Dict[str, Position] = field(default_factory=dict)
 
-def vol_forecast(returns: pd.Series, cfg: Dict) -> pd.Series:
-    method = cfg.get("forecast", {}).get("method", "ewma")
-    if method == "ewma":
-        alpha = cfg.get("forecast", {}).get("ewma_alpha", 0.06)
-        vol = returns.ewm(alpha=alpha, adjust=False).std().shift(1)
-    else:
-        window = cfg.get("forecast", {}).get("window", 60)
-        vol = returns.rolling(window).std().shift(1)
-    floor = cfg.get("forecast", {}).get("floor_sigma", 0.0005)
-    return vol.clip(lower=floor)
+    def ensure(self, symbol: str):
+        if symbol not in self.positions:
+            self.positions[symbol] = Position()
 
+    def update_fill(self, symbol: str, fill_qty: float, fill_price: float, fee: float):
+        self.ensure(symbol)
+        pos = self.positions[symbol]
+        self.cash -= fill_qty * fill_price
+        self.cash -= fee
 
-def position_notional(price: float, sigma: float, cfg: Dict) -> float:
-    target = cfg.get("target_sigma_annual", 0.12)
-    base = cfg.get("per_symbol_notional_cap_usd", 20000)
-    ann_factor = np.sqrt(365 * 24 * 60)
-    forecast_ann = sigma * ann_factor
-    notional = target / forecast_ann * base if forecast_ann > 0 else base
-    cap = cfg.get("per_symbol_notional_cap_usd", 20000)
-    return float(np.clip(notional, -cap, cap))
+        new_qty = pos.qty + fill_qty
+        if abs(new_qty) < 1e-12:
+            pos.qty = 0.0
+            pos.entry_price = 0.0
+        elif pos.qty == 0.0:
+            pos.qty = new_qty
+            pos.entry_price = fill_price
+        else:
+            pos.entry_price = (pos.entry_price * pos.qty + fill_qty * fill_price) / new_qty
+            pos.qty = new_qty
+
+    def market_value(self, prices: Dict[str, float]) -> float:
+        mv = 0.0
+        for s, p in self.positions.items():
+            price = prices.get(s, 0.0)
+            mv += p.qty * price
+        return mv
+
+    def equity(self, prices: Dict[str, float]) -> float:
+        return self.cash + self.market_value(prices)
