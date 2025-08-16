@@ -1,0 +1,81 @@
+seed: 42
+data:
+  dir: "data"
+  months: ["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07"]
+  symbols: ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]
+
+engine:
+  timezone: "UTC"
+  write_intermediate_resamples: false
+
+horizons:
+  exec: "1T"
+  micro: "15T"
+  macro: "60T"
+  daily: "1D"
+
+warmup:
+  daily_lookback_closes: 120
+  micro_lookback_bars: 48
+  macro_lookback_bars: 60
+  atr_period_exec: 20
+  donchian_exec: 20
+  bbwidth_lookback_exec: 50
+
+signals:
+  regime:
+    lookbacks: [20, 60, 120]
+    slope_window_days: 60
+    score_bull_threshold: 0
+    score_bear_threshold: 0
+  micro:
+    slope_window_bars: 48
+    min_slope_long: 0.0
+    max_slope_short: 0.0
+  trigger:
+    mode: "donchian"
+    donchian_lookback: 20
+    ksigma_k: 2.25
+  compression:
+    enabled: true
+    percentile: 35
+    lookback: 50
+
+risk:
+  atr_period: 20
+  sl_mult: 2.0
+  tp_mult: 3.0
+  be_threshold: 0.55
+  tsl:
+    arm_threshold: 0.75
+    atr_mult: 1.25
+  daily_loss_limit_pct: 5.0
+  cooldown_losses: 3
+
+sizing:
+  mode: "vol_target"
+  target_sigma_annual: 0.12
+  forecast:
+    method: "ewma"
+    ewma_alpha: 0.06
+    floor_sigma: 0.0005
+  per_symbol_notional_cap_usd: 20000
+  portfolio_gross_cap_usd: 50000
+
+costs:
+  taker_fee_bps: 4
+  maker_fee_bps: 2
+  slippage:
+    mode: "atr_fraction"
+    atr_divisor: 1000
+    min_spread_bps: 1.0
+
+limits:
+  data_stale_sec_kill: 10
+  latency_bars: 0
+
+reports:
+  write_trades: true
+  write_equity: true
+  write_bootstrap: true
+  write_logs: true
