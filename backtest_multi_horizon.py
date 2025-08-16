@@ -2,7 +2,9 @@
 import os, argparse
 from typing import Dict
 import pandas as pd
-from tqdm import tqdm
+from pathlib import Path
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from backtester.engine import MultiHorizonEngine, StrategyConfig
 from backtester.execution import ExecutionConfig
@@ -13,6 +15,13 @@ def load_config(path: str) -> Dict:
     import yaml
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _bars_cache_path(symbol, data_dir, months, interval, results_dir):
+    h = hashlib.sha1(("|".join(months)).encode()).hexdigest()[:8]
+    cache_dir = Path(results_dir) / "_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{symbol}_{h}_{interval}.parquet"
 
 
 def run_symbol(symbol: str, cfg: Dict, results_dir: str, debug: bool):
@@ -30,8 +39,15 @@ def run_symbol(symbol: str, cfg: Dict, results_dir: str, debug: bool):
         print(f"[ERROR] {e}")
         return None
 
-    print(f"[{symbol}] Building {interval} bars…", flush=True)
-    bars = build_minute_bars(ticks, interval=interval)
+    cache_path = _bars_cache_path(symbol, data_dir, months, interval, results_dir)
+    if cache_path.exists():
+        print(f"[{symbol}] Using cached {interval} bars → {cache_path.name}", flush=True)
+        bars = pd.read_parquet(cache_path)
+    else:
+        print(f"[{symbol}] Building {interval} bars…", flush=True)
+        bars = build_minute_bars(ticks, interval=interval)
+        if not bars.empty:
+            bars.to_parquet(cache_path, index=False)
     if bars.empty:
         print(f"[WARN] No bars for {symbol} in months {months}")
         return None
@@ -76,12 +92,20 @@ def main():
     cfg = load_config(args.config)
     os.makedirs(args.results_dir, exist_ok=True)
 
-    equities = []
-    for s in tqdm(cfg["data"]["symbols"], desc="Symbols", position=0, dynamic_ncols=True):
-        last_eq = run_symbol(s, cfg, args.results_dir, debug=args.debug)
-        equities.append({"symbol": s, "final_equity": last_eq})
+    syms = cfg["data"]["symbols"]
+    results = []
+    with ThreadPoolExecutor(max_workers=min(4, len(syms))) as ex:
+        futs = {ex.submit(run_symbol, s, cfg, args.results_dir, args.debug): s for s in syms}
+        for fut in as_completed(futs):
+            s = futs[fut]
+            try:
+                last_eq = fut.result()
+            except Exception as e:
+                print(f"[ERROR] {s}: {e}")
+                last_eq = None
+            results.append({"symbol": s, "final_equity": last_eq})
 
-    pd.DataFrame(equities).to_csv(os.path.join(args.results_dir, "summary.csv"), index=False)
+    pd.DataFrame(results).to_csv(os.path.join(args.results_dir, "summary.csv"), index=False)
     print("✅ Backtest done. See results/")
 
 
