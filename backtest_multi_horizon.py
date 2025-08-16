@@ -20,6 +20,7 @@ def run_symbol(symbol: str, cfg: Dict, results_dir: str, debug: bool):
     months = cfg["data"]["months"]
     interval = cfg["data"]["resample_interval"]
 
+    print(f"[{symbol}] Loading ticks for {months}…", flush=True)
     try:
         ticks = load_ticks_for_months(symbol, data_dir, months)
     except FileNotFoundError as e:
@@ -29,11 +30,13 @@ def run_symbol(symbol: str, cfg: Dict, results_dir: str, debug: bool):
         print(f"[ERROR] {e}")
         return None
 
+    print(f"[{symbol}] Building {interval} bars…", flush=True)
     bars = build_minute_bars(ticks, interval=interval)
     if bars.empty:
         print(f"[WARN] No bars for {symbol} in months {months}")
         return None
 
+    print(f"[{symbol}] Running simulation on {len(bars):,} bars…", flush=True)
     scfg = StrategyConfig(
         momentum_windows = cfg["strategy"]["momentum_windows"],
         breakout_lookback= cfg["strategy"]["breakout_lookback"],
@@ -74,7 +77,7 @@ def main():
     os.makedirs(args.results_dir, exist_ok=True)
 
     equities = []
-    for s in tqdm(cfg["data"]["symbols"], desc="Symbols"):
+    for s in tqdm(cfg["data"]["symbols"], desc="Symbols", position=0, dynamic_ncols=True):
         last_eq = run_symbol(s, cfg, args.results_dir, debug=args.debug)
         equities.append({"symbol": s, "final_equity": last_eq})
 

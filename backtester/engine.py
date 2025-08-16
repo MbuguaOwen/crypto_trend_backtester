@@ -79,7 +79,14 @@ class MultiHorizonEngine:
         diag = DebugCounters(total_bars=len(df), warmup=warmup)
         debug_rows: List[Dict] = []
 
-        for i in tqdm(range(len(df)), desc=f"Sim {self.symbol}", leave=False):
+        for i in tqdm(
+            range(len(df)),
+            desc=f"Sim {self.symbol}",
+            leave=False,
+            position=1,
+            dynamic_ncols=True,
+            mininterval=0.2
+        ):
             row = df.iloc[i]
             ts = int(row["ts"])
             price = float(row["close"])
