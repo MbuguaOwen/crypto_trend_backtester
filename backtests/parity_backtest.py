@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os, argparse, yaml
 from typing import Dict, List
-from datetime import datetime
 
 import pandas as pd
 from tqdm.auto import tqdm
@@ -17,14 +16,18 @@ from core_reuse.execution_helpers import ensure_min_qty
 
 def _normalize_freq(tf: str) -> str:
     tf = tf.strip().lower()
-    if tf in {"1m", "1min", "1minute"}:
+    if tf in {"1m", "1min", "1minute", "1t"}:
         return "1min"
+    if tf.endswith("t") and tf[:-1].isdigit():
+        return f"{int(tf[:-1])}min"
     if tf.endswith("m") and tf[:-1].isdigit():
         return f"{int(tf[:-1])}min"
     if tf.endswith("min") and tf[:-3].isdigit():
         return f"{int(tf[:-3])}min"
     if tf.endswith("h") and tf[:-1].isdigit():
         return f"{int(tf[:-1])}h"
+    if tf.endswith("hour") and tf[:-4].isdigit():
+        return f"{int(tf[:-4])}h"
     return tf
 
 
@@ -42,14 +45,6 @@ def _resample_timeframes(df1m: pd.DataFrame, tfs: List[str]) -> Dict[str, pd.Dat
             v = df1m["volume"].resample(rule).sum()
             out[rule] = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
     return out
-
-
-def _expand_months_to_files(template: str, symbol: str, months: List[str]) -> List[str]:
-    files = []
-    for m in months:
-        dt = datetime.strptime(m, "%Y-%m")
-        files.append(template.format(symbol=symbol, YYYY=f"{dt.year:04d}", MM=f"{dt.month:02d}"))
-    return files
 
 class ParityEngine:
     def __init__(self, cfg: dict, symbol: str, equity_usd: float, progress: bool=True):
@@ -238,58 +233,69 @@ def main():
         cfg = yaml.safe_load(f) or {}
 
     cfg_bt = (cfg.get("backtest") or {})
-    # CLI has priority for single-file
+
+    # ---- Single-file mode (CLI --data takes precedence) ----
     if args.data:
-        # Single-file mode
         df1m = load_1m_df(args.data)
         eng = ParityEngine(cfg, args.symbol, args.equity_usd, progress=not args.no_progress)
         eng.run(df1m, args.out)
         return
 
-    # Multi-file mode (months + template) only if --data is NOT provided
-    months = []
+    # ---- Multi-file mode (months + template) ----
+    # months: CLI > config; data_template: CLI > config > default to ticks
     if args.months:
         months = [m.strip() for m in args.months.split(",") if m.strip()]
     else:
         months = list(cfg_bt.get("months", []))
-
-    # Use CLI template if given; otherwise config; otherwise default to TICKS pattern
     data_template = args.data_template or cfg_bt.get("data_template", "data/{symbol}/{symbol}-ticks-{YYYY}-{MM}.csv")
 
     if not months:
-        raise SystemExit("No --data provided and no months configured. Set --months or backtest.months in config.yaml.")
+        raise SystemExit("No --data provided and no backtest.months configured. Use --months or set backtest.months in config.yaml.")
 
-    files = _expand_months_to_files(data_template, args.symbol, months)
+    # Build file list (YYYY-MM -> path), with a simple alt fallback between -ticks- and -1m-
+    from datetime import datetime as _dt
+    files = []
+    for m in months:
+        dtm = _dt.strptime(m, "%Y-%m")
+        p = data_template.format(symbol=args.symbol, YYYY=f"{dtm.year:04d}", MM=f"{dtm.month:02d}")
+        files.append(p)
 
-    # Auto-fallback: if a built path doesn't exist and template looks like 1m, try the ticks template, and vice versa
     import os
     resolved = []
     for fp in files:
         if os.path.exists(fp):
             resolved.append(fp)
             continue
-        # try common alternates
-        alts = []
+        alt = None
         if "-1m-" in fp:
-            alts.append(fp.replace("-1m-", "-ticks-"))
-        if "-ticks-" in fp:
-            alts.append(fp.replace("-ticks-", "-1m-"))
-        alt_hit = None
-        for a in alts:
-            if os.path.exists(a):
-                alt_hit = a
-                break
-        if alt_hit:
-            resolved.append(alt_hit)
+            a = fp.replace("-1m-", "-ticks-")
+            if os.path.exists(a): alt = a
+        elif "-ticks-" in fp:
+            a = fp.replace("-ticks-", "-1m-")
+            if os.path.exists(a): alt = a
+        if alt:
+            resolved.append(alt)
         else:
-            raise FileNotFoundError(f"Could not find {fp} (or alternates). Check backtest.data_template / filenames.")
+            raise FileNotFoundError(f"Missing {fp} (and alternate). Fix backtest.data_template or filenames.")
 
+    # Parent progress bar while LOADING files
+    parent = tqdm(resolved, desc=f"Files:{args.symbol}", unit="file", leave=True) if not args.no_progress else None
+    frames = []
+    for fp in resolved:
+        if parent: parent.set_postfix_str(os.path.basename(fp))
+        dfm = load_1m_df(fp)
+        frames.append(dfm)
+        if parent: parent.update(1)
+    if parent: parent.close()
+
+    # ---- CONCAT: one continuous 1-minute stream (this is the key) ----
+    import pandas as pd
+    df_all = pd.concat(frames, axis=0).sort_index()
+    df_all = df_all[~df_all.index.duplicated(keep="last")]  # dedupe overlaps between months
+
+    # Run once over the whole stream (now lookbacks/warmup carry across months)
     eng = ParityEngine(cfg, args.symbol, args.equity_usd, progress=not args.no_progress)
-    parent = tqdm(resolved, desc=f"Files:{args.symbol}", unit="file", leave=True)
-    for fp in parent:
-        df1m = load_1m_df(fp)
-        eng.run_df(df1m)
-    eng.write_csv(args.out)
+    eng.run(df_all, args.out)
 
 if __name__ == "__main__":
     main()
