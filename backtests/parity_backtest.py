@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, argparse, yaml
-from typing import Dict, List, Optional
+from typing import Dict, List
 from datetime import datetime
 
 import pandas as pd
@@ -11,7 +11,7 @@ from core_reuse.utils import rolling_atr
 from core_reuse.regime import TSMOMRegime
 from core_reuse.trigger import BreakoutAfterCompression
 from core_reuse.risk import RiskManager
-from core_reuse.trade import Trade, EXIT_SL, EXIT_TP, EXIT_BE, EXIT_TSL
+from core_reuse.trade import Trade, EXIT_SL, EXIT_TP
 from core_reuse.execution_helpers import ensure_min_qty
 
 
@@ -60,9 +60,21 @@ class ParityEngine:
         self.trigger = BreakoutAfterCompression(cfg)
         self.risk = RiskManager(cfg.get("strategy",{}).get("risk", cfg.get("risk",{})))
         self.ex_constraints = cfg.get("exchange",{}).get("symbols",{}).get(symbol,{})
-        self.open_trade: Optional[Trade] = None
+        self.open_trade = None
         self.rows = []
         self.progress = progress
+
+        # ---- NEW: dynamic warmup based on longest lookback ----
+        trig = self.cfg.get("strategy",{}).get("trigger",{})
+        comp = trig.get("compression",{})
+        ks   = trig.get("ksigma",{})
+        risk = self.cfg.get("strategy",{}).get("risk",{})
+        self.warmup = max(
+            int(trig.get("donchian_lookback", 20)),
+            int(comp.get("bb_window", 50)),
+            int(ks.get("window", 60)),
+            int(risk.get("atr_window", 20)),
+        ) + 2  # a tiny buffer
 
     def step(self, ts, bar, df_hist):
         # Regime inputs via multi-tf (no look-ahead)
@@ -131,15 +143,53 @@ class ParityEngine:
         """Process a single 1m dataframe without writing to disk."""
         it = enumerate(df1m.iterrows(), 1)
         pbar = tqdm(total=len(df1m), desc=f"{self.symbol}", unit="bar", leave=False) if self.progress else None
-        hist = pd.DataFrame(columns=df1m.columns)
+
         for i, (ts, bar) in it:
-            hist = pd.concat([hist, pd.DataFrame([bar], index=[ts])], axis=0)
-            if i > 100:
-                self.step(ts, bar, hist)
+            # Skip until we have enough history for ATR/Donchian/compression etc.
+            if i <= self.warmup:
+                if pbar:
+                    pbar.update(1)
+                continue
+
+            # History up to and including this bar; no concat, no warnings.
+            df_hist = df1m.iloc[:i]
+            self.step(ts, bar, df_hist)
+
             if pbar:
                 pbar.update(1)
+
         if pbar:
             pbar.close()
+
+    def write_csv(self, out_csv: str):
+        os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+        pd.DataFrame(
+            self.rows,
+            columns=["ts_open","ts_close","symbol","side","entry","exit","qty","pnl","exit_type","entry_reason"]
+        ).to_csv(out_csv, index=False)
+
+    def run(self, df1m: pd.DataFrame, out_csv: str):
+        it = enumerate(df1m.iterrows(), 1)
+        pbar = tqdm(total=len(df1m), desc=f"{self.symbol}", unit="bar", leave=False) if self.progress else None
+
+        for i, (ts, bar) in it:
+            # Skip until we have enough history for ATR/Donchian/compression etc.
+            if i <= self.warmup:
+                if pbar:
+                    pbar.update(1)
+                continue
+
+            # History up to and including this bar; no concat, no warnings.
+            df_hist = df1m.iloc[:i]
+            self.step(ts, bar, df_hist)
+
+            if pbar:
+                pbar.update(1)
+
+        if pbar:
+            pbar.close()
+
+        # Final forced exit if position remains open at end of data
         if self.open_trade is not None:
             ts = df1m.index[-1]
             last_close = float(df1m.iloc[-1]["close"])
@@ -161,16 +211,12 @@ class ParityEngine:
             })
             self.open_trade = None
 
-    def write_csv(self, out_csv: str):
+        # dump trades
         os.makedirs(os.path.dirname(out_csv), exist_ok=True)
         pd.DataFrame(
             self.rows,
             columns=["ts_open","ts_close","symbol","side","entry","exit","qty","pnl","exit_type","entry_reason"]
         ).to_csv(out_csv, index=False)
-
-    def run(self, df1m: pd.DataFrame, out_csv: str):
-        self.run_df(df1m)
-        self.write_csv(out_csv)
 
 def parse_args():
     ap = argparse.ArgumentParser(description="TSMOM Parity Backtest")
