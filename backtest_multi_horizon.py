@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import os, argparse
 from typing import Dict
@@ -9,12 +8,14 @@ from backtester.engine import MultiHorizonEngine, StrategyConfig
 from backtester.execution import ExecutionConfig
 from data_loader import load_ticks_for_months, build_minute_bars
 
+
 def load_config(path: str) -> Dict:
     import yaml
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-def run_symbol(symbol: str, cfg: Dict, results_dir: str):
+
+def run_symbol(symbol: str, cfg: Dict, results_dir: str, debug: bool):
     data_dir = cfg["data"]["data_dir"]
     months = cfg["data"]["months"]
     interval = cfg["data"]["resample_interval"]
@@ -53,7 +54,7 @@ def run_symbol(symbol: str, cfg: Dict, results_dir: str):
         initial_capital=cfg["broker"]["initial_capital"],
         results_dir=results_dir
     )
-    engine.run()
+    engine.run(debug=debug)
 
     eq_path = os.path.join(results_dir, f"{symbol}_equity.csv")
     if os.path.exists(eq_path):
@@ -61,10 +62,12 @@ def run_symbol(symbol: str, cfg: Dict, results_dir: str):
         return df.iloc[-1]["equity"] if not df.empty else None
     return None
 
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Path to YAML config")
-    ap.add_argument("--results-dir", default="results", help="Where to write results")
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--results-dir", default="results")
+    ap.add_argument("--debug", action="store_true", help="Write per-bar diagnostics")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -72,11 +75,12 @@ def main():
 
     equities = []
     for s in tqdm(cfg["data"]["symbols"], desc="Symbols"):
-        last_eq = run_symbol(s, cfg, args.results_dir)
+        last_eq = run_symbol(s, cfg, args.results_dir, debug=args.debug)
         equities.append({"symbol": s, "final_equity": last_eq})
 
     pd.DataFrame(equities).to_csv(os.path.join(args.results_dir, "summary.csv"), index=False)
     print("✅ Backtest done. See results/")
+
 
 if __name__ == "__main__":
     main()
