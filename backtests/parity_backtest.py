@@ -16,27 +16,15 @@ from core_reuse.execution_helpers import ensure_min_qty
 
 
 def _normalize_freq(tf: str) -> str:
-    """
-    Normalize common timeframe strings into Pandas-friendly, non-deprecated
-    offsets. Examples:
-      "1m","1min","1minute" -> "1min"
-      "5m","5min"           -> "5min"
-      "15m","15min"         -> "15min"
-      "1h"                  -> "1h"
-      "4h"                  -> "4h"
-    """
     tf = tf.strip().lower()
     if tf in {"1m", "1min", "1minute"}:
         return "1min"
-    #  N m / min
     if tf.endswith("m") and tf[:-1].isdigit():
         return f"{int(tf[:-1])}min"
     if tf.endswith("min") and tf[:-3].isdigit():
         return f"{int(tf[:-3])}min"
-    #  N h
     if tf.endswith("h") and tf[:-1].isdigit():
         return f"{int(tf[:-1])}h"
-    # Fallback: trust caller (must already be safe, like "30min" or "2h")
     return tf
 
 
@@ -57,17 +45,9 @@ def _resample_timeframes(df1m: pd.DataFrame, tfs: List[str]) -> Dict[str, pd.Dat
 
 
 def _expand_months_to_files(template: str, symbol: str, months: List[str]) -> List[str]:
-    """
-    Expand ['YYYY-MM', ...] to concrete file paths using a python format template
-    like: "data/{symbol}/{symbol}-1m-{YYYY}-{MM}.csv" or "...-ticks-{YYYY}-{MM}.csv"
-    """
     files = []
     for m in months:
-        # validate and split
-        try:
-            dt = datetime.strptime(m, "%Y-%m")
-        except ValueError:
-            raise ValueError(f"Invalid month '{m}', expected YYYY-MM")
+        dt = datetime.strptime(m, "%Y-%m")
         files.append(template.format(symbol=symbol, YYYY=f"{dt.year:04d}", MM=f"{dt.month:02d}"))
     return files
 
@@ -196,7 +176,7 @@ def parse_args():
     ap = argparse.ArgumentParser(description="TSMOM Parity Backtest")
     ap.add_argument("--config", required=True)
     ap.add_argument("--symbol", required=True)
-    ap.add_argument("--data", required=True, help="CSV file path (1m OHLCV or ticks)")
+    ap.add_argument("--data", default=None, help="CSV file path (1m OHLCV or ticks)")
     ap.add_argument("--out", required=True, help="Output trades CSV")
     ap.add_argument("--equity_usd", required=True, type=float)
     ap.add_argument("--no-progress", action="store_true")
@@ -211,28 +191,59 @@ def main():
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
-    # Read months/template from CLI or config
     cfg_bt = (cfg.get("backtest") or {})
+    # CLI has priority for single-file
+    if args.data:
+        # Single-file mode
+        df1m = load_1m_df(args.data)
+        eng = ParityEngine(cfg, args.symbol, args.equity_usd, progress=not args.no_progress)
+        eng.run(df1m, args.out)
+        return
+
+    # Multi-file mode (months + template) only if --data is NOT provided
     months = []
     if args.months:
         months = [m.strip() for m in args.months.split(",") if m.strip()]
     else:
         months = list(cfg_bt.get("months", []))
-    data_template = args.data_template or cfg_bt.get("data_template")
+
+    # Use CLI template if given; otherwise config; otherwise default to TICKS pattern
+    data_template = args.data_template or cfg_bt.get("data_template", "data/{symbol}/{symbol}-ticks-{YYYY}-{MM}.csv")
+
+    if not months:
+        raise SystemExit("No --data provided and no months configured. Set --months or backtest.months in config.yaml.")
+
+    files = _expand_months_to_files(data_template, args.symbol, months)
+
+    # Auto-fallback: if a built path doesn't exist and template looks like 1m, try the ticks template, and vice versa
+    import os
+    resolved = []
+    for fp in files:
+        if os.path.exists(fp):
+            resolved.append(fp)
+            continue
+        # try common alternates
+        alts = []
+        if "-1m-" in fp:
+            alts.append(fp.replace("-1m-", "-ticks-"))
+        if "-ticks-" in fp:
+            alts.append(fp.replace("-ticks-", "-1m-"))
+        alt_hit = None
+        for a in alts:
+            if os.path.exists(a):
+                alt_hit = a
+                break
+        if alt_hit:
+            resolved.append(alt_hit)
+        else:
+            raise FileNotFoundError(f"Could not find {fp} (or alternates). Check backtest.data_template / filenames.")
 
     eng = ParityEngine(cfg, args.symbol, args.equity_usd, progress=not args.no_progress)
-
-    if months and data_template:
-        files = _expand_months_to_files(data_template, args.symbol, months)
-        parent = tqdm(files, desc=f"Files:{args.symbol}", unit="file", leave=True) if eng.progress else files
-        for fp in parent:
-            df1m = load_1m_df(fp)
-            eng.run_df(df1m)
-        eng.write_csv(args.out)
-    else:
-        # Single-file mode (original behavior)
-        df1m = load_1m_df(args.data)
-        eng.run(df1m, args.out)
+    parent = tqdm(resolved, desc=f"Files:{args.symbol}", unit="file", leave=True)
+    for fp in parent:
+        df1m = load_1m_df(fp)
+        eng.run_df(df1m)
+    eng.write_csv(args.out)
 
 if __name__ == "__main__":
     main()

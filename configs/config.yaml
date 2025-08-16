@@ -39,11 +39,5 @@ exchange:
       min_notional: 5.0
 
 backtest:
-  # Choose the months you want to stitch together (oldest -> newest)
-  months: ["2025-01", "2025-02"]
-
-  # Template for month files; supports {symbol}, {YYYY}, {MM}
-  # For native 1-minute files:
-  data_template: "data/{symbol}/{symbol}-1m-{YYYY}-{MM}.csv"
-  # Or, if you store monthly ticks:
-  # data_template: "data/{symbol}/{symbol}-ticks-{YYYY}-{MM}.csv"
+  months: ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06", "2025-07"]
+  data_template: "data/{symbol}/{symbol}-ticks-{YYYY}-{MM}.csv"
