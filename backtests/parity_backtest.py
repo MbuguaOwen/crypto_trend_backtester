@@ -1,172 +1,140 @@
-import argparse
-import json
-import math
-from pathlib import Path
-from typing import Dict
-
+from __future__ import annotations
+import os, argparse, yaml
+from typing import Dict, List, Optional
 import pandas as pd
+from tqdm.auto import tqdm
 
-import yaml
+from .data_ingest import load_1m_df
+from core_reuse.utils import rolling_atr
+from core_reuse.regime import TSMOMRegime
+from core_reuse.trigger import BreakoutAfterCompression
+from core_reuse.risk import RiskManager
+from core_reuse.trade import Trade, EXIT_SL, EXIT_TP, EXIT_BE, EXIT_TSL
+from core_reuse.execution_helpers import ensure_min_qty
 
-from regime import TSMOMRegime
-from trigger import BreakoutAfterCompression
-from risk import RiskManager
-from trade import Trade, EXIT_SL, EXIT_TP, EXIT_BE, EXIT_TSL
-from utils import utc_ms_now, ensure_min_qty
-
-
-# ---------- Data helpers ----------
-def load_1m_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    if "ts" in df.columns:
-        idx = pd.to_datetime(df["ts"], unit="ms", utc=True, errors="coerce")
-    else:
-        idx = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-    df.index = idx
-    return df[["open", "high", "low", "close", "volume"]].sort_index()
-
-
-def downsample(df1m: pd.DataFrame, tf: str) -> pd.DataFrame:
-    o = df1m["open"].resample(tf).first()
-    h = df1m["high"].resample(tf).max()
-    l = df1m["low"].resample(tf).min()
-    c = df1m["close"].resample(tf).last()
-    v = df1m["volume"].resample(tf).sum()
-    out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
+def _resample_timeframes(df1m: pd.DataFrame, tfs: List[str]) -> Dict[str, pd.DataFrame]:
+    out = {}
+    for tf in tfs:
+        if tf in ("1m","1min","1minute"):
+            out["1min"] = df1m.copy()
+        else:
+            rule = tf.replace("min","T").replace("1h","1H").replace("h","H")
+            o = df1m["open"].resample(rule).first()
+            h = df1m["high"].resample(rule).max()
+            l = df1m["low"].resample(rule).min()
+            c = df1m["close"].resample(rule).last()
+            v = df1m["volume"].resample(rule).sum()
+            out[tf] = pd.DataFrame({"open":o,"high":h,"low":l,"close":c,"volume":v}).dropna()
     return out
 
-
-def make_tf_data(df1m: pd.DataFrame, cfg: dict) -> Dict[str, pd.DataFrame]:
-    tcfg = cfg["strategy"]["tsmom_regime"]["timeframes"]
-    tf_data = {}
-    for tf, _tc in tcfg.items():
-        rule = tf.replace("m", "T").replace("h", "H").upper()
-        tf_data[tf] = downsample(df1m, rule)
-    return tf_data
-
-
-# ---------- Exchange constraint adapter ----------
-def ensure_min_qty_like_ccxt(qty: float, step: float, min_amount: float, min_cost: float, last_price: float) -> float:
-    return ensure_min_qty(qty, step, min_amount, min_cost, last_price)
-
-
-# ---------- Parity backtester ----------
-class ParityBacktester:
-    def __init__(self, cfg: dict, equity_usd: float, rules: dict):
+class ParityEngine:
+    def __init__(self, cfg: dict, symbol: str, equity_usd: float, progress: bool=True):
         self.cfg = cfg
-        self.equity_usd = equity_usd
-        self.rules = rules
+        self.symbol = symbol
+        self.equity_usd = float(equity_usd)
         self.regime = TSMOMRegime(cfg)
         self.trigger = BreakoutAfterCompression(cfg)
-        self.risk = RiskManager(cfg)
-        self.state = {}
-        self.trades = []
+        self.risk = RiskManager(cfg.get("strategy",{}).get("risk", cfg.get("risk",{})))
+        self.ex_constraints = cfg.get("exchange",{}).get("symbols",{}).get(symbol,{})
+        self.open_trade: Optional[Trade] = None
+        self.rows = []
+        self.progress = progress
 
-    def _atr_last(self, df1m: pd.DataFrame) -> float:
-        a = self.risk.compute_atr(df1m)
-        return float(a.iloc[-1]) if a.shape[0] else 0.0
+    def step(self, ts, bar, df_hist):
+        # Regime inputs via multi-tf (no look-ahead)
+        tfs = self.cfg.get("strategy",{}).get("ts_mom",{}).get("timeframes", ["1min","5min","15min","1h"])
+        tf_dfs = _resample_timeframes(df_hist, tfs)
+        closes_by_tf = {k: v["close"] for k,v in tf_dfs.items() if len(v)>0}
+        regime = self.regime.classify(closes_by_tf)
 
-    def _maybe_entry(self, symbol: str, df1m: pd.DataFrame, tf_data: Dict[str, pd.DataFrame], now_ts: int):
-        st = self.state[symbol]
-        if st["open_trade"] is not None:
-            return
-        regime = self.regime.classify({k: v for k, v in tf_data.items()})
-        sig = self.trigger.check(df1m, regime)
-        if not sig:
-            return
-        direction, reason = sig["direction"], sig["reason"]
-        price = float(df1m["close"].iloc[-1])
-        atr_val = self._atr_last(df1m)
-        side = "long" if direction == "long" else "short"
-        symcfg = self.cfg["symbols"].get(symbol, {}) if "symbols" in self.cfg else {}
-        sl, tp = self.risk.initial_levels(side, price, atr_val, symcfg)
-        fees_bps = float(self.cfg.get("exchange", {}).get("taker_fee_bps", 7.5))
-        max_lev = float(self.cfg.get("risk", {}).get("vol_targeting", {}).get("sizing", {}).get("max_leverage", 1.0))
-        qty = self.risk.position_size_units(self.equity_usd, price, sl, fees_bps, side, max_lev)
-        r = self.rules.get(symbol, {})
-        step = float(r.get("amount_step", 0.0))
-        min_amount = float(r.get("min_amount", 0.0))
-        min_cost = float(r.get("min_cost", 0.0))
-        qty = ensure_min_qty_like_ccxt(qty, step, min_amount, min_cost, price)
-        if qty <= 0:
-            return
-        tr = Trade(symbol=symbol, side=side, entry_price=price, qty=qty, sl=sl, tp=tp,
-                   ts_open=now_ts, meta={"entry_reason": reason, "initial_sl": sl})
-        st["open_trade"] = tr
-        st["highs_since_entry"] = float(df1m["high"].iloc[-1])
-        st["lows_since_entry"] = float(df1m["low"].iloc[-1])
+        atr_win = int(self.cfg.get("strategy",{}).get("risk",{}).get("atr_window", 20))
+        atr_series = rolling_atr(df_hist, atr_win)
+        atr_last = float(atr_series.shift(1).iloc[-1]) if len(atr_series)>0 else float("nan")
 
-    def _maybe_exit(self, symbol: str, df1m: pd.DataFrame, now_ts: int):
-        st = self.state[symbol]
-        tr: Trade = st["open_trade"]
-        if tr is None:
-            return
-        high = float(df1m["high"].iloc[-1])
-        low = float(df1m["low"].iloc[-1])
-        last = float(df1m["close"].iloc[-1])
-        atr_val = self._atr_last(df1m)
-        st["highs_since_entry"] = max(st["highs_since_entry"], high)
-        st["lows_since_entry"] = min(st["lows_since_entry"], low)
-        tr.update_levels(last_price=last, atr_val=atr_val,
-                         highs_since_entry=st["highs_since_entry"],
-                         lows_since_entry=st["lows_since_entry"], cfg=self.cfg)
-        exit_type = tr.check_exit(high=high, low=low)
-        if exit_type:
-            exit_px = tr.sl if exit_type in (EXIT_SL, EXIT_BE, EXIT_TSL) else tr.tp
-            pnl = (exit_px - tr.entry_price) * tr.qty if tr.side == "long" else (tr.entry_price - exit_px) * tr.qty
-            self.trades.append({
-                "symbol": tr.symbol,
-                "side": tr.side,
-                "entry": tr.entry_price,
-                "exit": exit_px,
-                "qty": tr.qty,
-                "ts_open": tr.ts_open,
-                "ts_close": now_ts,
-                "exit_type": exit_type,
-                "entry_reason": tr.meta.get("entry_reason", ""),
-                "pnl": pnl,
-            })
-            st["open_trade"] = None
-            st["highs_since_entry"] = -1e18
-            st["lows_since_entry"] = 1e18
+        # Update open trade & check exits
+        if self.open_trade is not None:
+            self.open_trade.update_levels(
+                bar["close"],
+                be_frac=self.risk.be_frac,
+                atr=atr_last if pd.notna(atr_last) else 0.0,
+                tsl_mult=self.risk.tsl_mult
+            )
+            if self.open_trade.check_exit(bar["high"], bar["low"]):
+                self.open_trade.ts_close = ts
+                pnl = (self.open_trade.exit_price - self.open_trade.entry) * self.open_trade.qty if self.open_trade.side=="LONG" else (self.open_trade.entry - self.open_trade.exit_price) * self.open_trade.qty
+                self.rows.append({
+                    "ts_open": self.open_trade.ts_open.isoformat(),
+                    "ts_close": ts.isoformat(),
+                    "symbol": self.symbol,
+                    "side": self.open_trade.side,
+                    "entry": round(self.open_trade.entry, 6),
+                    "exit": round(float(self.open_trade.exit_price), 6),
+                    "qty": round(self.open_trade.qty, 8),
+                    "pnl": round(float(pnl), 6),
+                    "exit_type": self.open_trade.exit_type,
+                    "entry_reason": self.open_trade.entry_reason,
+                })
+                self.open_trade = None
+                return
 
-    def run_symbol(self, symbol: str, df1m: pd.DataFrame):
-        self.state[symbol] = {"open_trade": None, "highs_since_entry": -1e18, "lows_since_entry": 1e18}
-        tf_data = make_tf_data(df1m, self.cfg)
-        for ts, row in df1m.iterrows():
-            df_hist = df1m.loc[:ts]
-            tf_hist = {tf: tdf.loc[:ts] for tf, tdf in tf_data.items()}
-            if tf_hist and all(len(x) >= 5 for x in tf_hist.values()):
-                self._maybe_entry(symbol, df_hist, tf_hist, int(ts.value // 1_000_000))
-            self._maybe_exit(symbol, df_hist, int(ts.value // 1_000_000))
+        # If flat, check entry
+        if self.open_trade is None:
+            ok, side, reason = self.trigger.check(df_hist, atr_last, regime)
+            if ok and side in ("LONG","SHORT"):
+                entry = bar["close"]
+                sl, tp = self.risk.initial_levels(entry, side, atr_last if pd.notna(atr_last) else 0.0)
+                qty = self.risk.position_size_units(
+                    equity_usd=self.equity_usd,
+                    entry=entry,
+                    sl=sl,
+                    taker_fee_bps=self.risk.taker_fee_bps,
+                    side=side,
+                    max_leverage=self.risk.max_leverage
+                )
+                amt_step = float(self.ex_constraints.get("amount_step", 0.0001))
+                min_qty = float(self.ex_constraints.get("min_qty", 0.0001))
+                min_notional = float(self.ex_constraints.get("min_notional", 5.0))
+                qty, valid = ensure_min_qty(qty, entry, amount_step=amt_step, min_qty=min_qty, min_notional=min_notional)
+                if not valid or qty<=0:
+                    return
+                self.open_trade = Trade(
+                    symbol=self.symbol, side=side, ts_open=ts, entry=float(entry),
+                    qty=float(qty), sl=float(sl), tp=float(tp), atr=float(atr_last if pd.notna(atr_last) else 0.0),
+                    entry_reason=reason
+                )
 
-    def to_csv(self, path: str):
-        pd.DataFrame(self.trades).to_csv(path, index=False)
+    def run(self, df1m: pd.DataFrame, out_csv: str):
+        it = enumerate(df1m.iterrows(), 1)
+        pbar = tqdm(total=len(df1m), desc=f"{self.symbol}", unit="bar", leave=False) if self.progress else None
+        hist = pd.DataFrame(columns=df1m.columns)
+        for i, (ts, bar) in it:
+            hist = pd.concat([hist, pd.DataFrame([bar], index=[ts])], axis=0)
+            if i>100:
+                self.step(ts, bar, hist)
+            if pbar:
+                pbar.update(1)
+        if pbar:
+            pbar.close()
+        os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+        pd.DataFrame(self.rows, columns=["ts_open","ts_close","symbol","side","entry","exit","qty","pnl","exit_type","entry_reason"]).to_csv(out_csv, index=False)
 
+def parse_args():
+    ap = argparse.ArgumentParser(description="TSMOM Parity Backtest")
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--symbol", required=True)
+    ap.add_argument("--data", required=True, help="CSV file path (1m OHLCV or ticks)")
+    ap.add_argument("--out", required=True, help="Output trades CSV")
+    ap.add_argument("--equity_usd", required=True, type=float)
+    ap.add_argument("--no-progress", action="store_true")
+    return ap.parse_args()
 
 def main():
-    pa = argparse.ArgumentParser()
-    pa.add_argument("--config", required=True)
-    pa.add_argument("--symbol", required=True)
-    pa.add_argument("--data_1m_csv", required=True)
-    pa.add_argument("--out", default="trades_parity.csv")
-    pa.add_argument("--equity_usd", type=float, default=10_000)
-    args = pa.parse_args()
-
-    if str(args.config).endswith(('.yaml', '.yml')):
-        cfg = yaml.safe_load(open(args.config))
-    else:
-        cfg = json.load(open(args.config, "r"))
-    df1m = load_1m_csv(args.data_1m_csv)
-    rules = (cfg.get("exchange_rules", {}) or {}).get(args.symbol, {
-        "amount_step": cfg.get("exchange", {}).get("amount_step", 0.0),
-        "min_amount": cfg.get("exchange", {}).get("min_amount", 0.0),
-        "min_cost": cfg.get("exchange", {}).get("min_cost", 0.0),
-    })
-    bt = ParityBacktester(cfg, equity_usd=args.equity_usd, rules={args.symbol: rules})
-    bt.run_symbol(args.symbol, df1m)
-    bt.to_csv(args.out)
-
+    args = parse_args()
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    df1m = load_1m_df(args.data)
+    eng = ParityEngine(cfg, args.symbol, args.equity_usd, progress=not args.no_progress)
+    eng.run(df1m, args.out)
 
 if __name__ == "__main__":
     main()

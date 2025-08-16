@@ -1,0 +1,39 @@
+strategy:
+  ts_mom:
+    timeframes: ["1min", "5min", "15min", "1h"]
+    lookbacks: [20, 60, 120]
+    consensus_threshold: 0.5
+  trigger:
+    donchian_lookback: 20
+    compression:
+      bb_window: 50
+      width_percentile_max: 30
+    atr_buffer_mult: 0.2
+    ksigma:
+      enabled: true
+      k: 2.0
+      window: 60
+  risk:
+    atr_window: 20
+    atr_mult_sl: 20.0
+    atr_mult_tp: 100.0
+    breakeven_trigger_frac_of_tp: 0.6
+    trailing_atr_mult: 10.0
+    risk_fraction: 0.005
+    taker_fee_bps: 5.0
+    max_leverage: 5.0
+
+exchange:
+  symbols:
+    BTCUSDT:
+      amount_step: 0.0001
+      min_qty: 0.0001
+      min_notional: 5.0
+    SOLUSDT:
+      amount_step: 0.01
+      min_qty: 0.01
+      min_notional: 5.0
+    ETHUSDT:
+      amount_step: 0.0001
+      min_qty: 0.0001
+      min_notional: 5.0

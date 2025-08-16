@@ -1,20 +1,41 @@
 import pandas as pd
-from backtests.parity_backtest import ParityBacktester, ensure_min_qty_like_ccxt
-from regime import TSMOMRegime
-from trigger import BreakoutAfterCompression
-from risk import RiskManager
-from trade import EXIT_SL, EXIT_TP, EXIT_BE, EXIT_TSL
+import numpy as np
+from core_reuse.execution_helpers import ensure_min_qty
+from core_reuse.trade import EXIT_SL, EXIT_TP, EXIT_BE, EXIT_TSL
+from backtests.parity_backtest import ParityEngine
+import yaml
 
+def test_qty_rounding_meets_minimums():
+    amt, ok = ensure_min_qty(0.00019, 60000, amount_step=0.0001, min_qty=0.0001, min_notional=5.0)
+    assert ok is True and abs(amt-0.0001)<1e-12
 
-def test_qty_rounding():
-    q = ensure_min_qty_like_ccxt(0.0012, step=0.001, min_amount=0.002, min_cost=5, last_price=10000)
-    assert q >= 0.002 and abs((q / 0.001) - round(q / 0.001)) < 1e-9
+    amt, ok = ensure_min_qty(0.00005, 60000, amount_step=0.0001, min_qty=0.0001, min_notional=5.0)
+    assert ok is False
 
+    amt, ok = ensure_min_qty(0.0001, 1.0, amount_step=0.0001, min_qty=0.0001, min_notional=5.0)
+    assert ok is False  # notional too small
 
-def test_has_exit_types_in_output(tmp_path, sample_cfg, sample_bars_1m_btc):
-    rules = {"BTCUSDT": {"amount_step": 0.001, "min_amount": 0.001, "min_cost": 5}}
-    bt = ParityBacktester(sample_cfg, equity_usd=10_000, rules=rules)
-    bt.run_symbol("BTCUSDT", sample_bars_1m_btc)
-    assert bt.trades, "no trades produced"
-    for t in bt.trades:
-        assert t["exit_type"] in (EXIT_SL, EXIT_TP, EXIT_BE, EXIT_TSL)
+def test_exit_taxonomy_is_valid():
+    assert set([EXIT_SL, EXIT_TP, EXIT_BE, EXIT_TSL]) == {"SL","TP","BE","TSL"}
+
+def test_synthetic_bars_produce_entry_and_exit(tmp_path):
+    cfg = yaml.safe_load(open("configs/config.yaml","r",encoding="utf-8"))
+    sym = "BTCUSDT"
+    idx = pd.date_range("2025-01-01", periods=400, freq="1min", tz="UTC")
+    price = np.concatenate([
+        np.full(200, 100.0),
+        np.linspace(100, 110, 200)
+    ])
+    df = pd.DataFrame({
+        "open": price,
+        "high": price + 0.05,
+        "low":  price - 0.05,
+        "close": price,
+        "volume": 1.0
+    }, index=idx)
+    out = tmp_path / "trades.csv"
+    eng = ParityEngine(cfg, sym, equity_usd=10000, progress=False)
+    eng.run(df, str(out))
+    rows = pd.read_csv(out)
+    assert len(rows) >= 1
+    assert rows["exit_type"].isin(["SL","TP","BE","TSL"]).all()
