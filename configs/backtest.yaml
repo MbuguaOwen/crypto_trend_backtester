@@ -1,8 +1,8 @@
 data:
   data_dir: ./data
-  symbols: [BTCUSDT]
-  months: ["2025-01"]
-  resample_interval: 1min
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  months: ["2024-12","2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07"]
+  resample_interval: "1min"
 broker:
   initial_capital: 100000
   taker_fee_bps: 1.0

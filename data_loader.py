@@ -1,4 +1,3 @@
-
 import os, glob
 from typing import List, Optional
 import pandas as pd
@@ -30,8 +29,9 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
         raise FileNotFoundError(f"No CSV files found under {path}")
 
     parts = []
-    for f in tqdm(files, desc=f"[{symbol}] Loading CSVs", unit="file", dynamic_ncols=True, leave=False):
-        # 1) Read header only to map aliases once per file
+    # NOTE: position=1 so it renders under the outer "Symbols" bar
+    for f in tqdm(files, desc=f"[{symbol}] Loading CSVs", unit="file", dynamic_ncols=True, leave=False, position=1):
+        # 1) Read header to map aliases once
         try:
             hdr = pd.read_csv(f, nrows=0, engine="pyarrow")
         except Exception:
@@ -56,13 +56,16 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
             usecols.append(mcol)
 
         # 2) Stream the file in chunks to show progress
+        #    Prefer the default C engine for chunking (pyarrow sometimes returns a full DataFrame).
         try:
-            it = pd.read_csv(f, usecols=usecols, chunksize=2_000_000, engine="pyarrow")
+            it = pd.read_csv(f, usecols=usecols, chunksize=2_000_000)  # no engine→C engine, chunked
         except Exception:
+            # very old pandas fallback
             it = pd.read_csv(f, usecols=usecols, chunksize=2_000_000, low_memory=False)
 
         buf = []
-        with tqdm(desc=f"[{symbol}] {os.path.basename(f)}", unit="rows", dynamic_ncols=True, leave=False) as pbar:
+        # per-file row counter at position=2
+        with tqdm(desc=f"[{symbol}] {os.path.basename(f)}", unit="rows", dynamic_ncols=True, leave=False, position=2) as pbar:
             for chunk in it:
                 pbar.update(len(chunk))
 
@@ -70,7 +73,6 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
                 if qcol is not None:
                     df = df.rename(columns={qcol: "qty"})
                 elif qqcol is not None:
-                    # derive qty from quote_qty / price
                     df["qty"] = pd.to_numeric(df[qqcol], errors="coerce") / pd.to_numeric(df["price"], errors="coerce")
                 else:
                     df["qty"] = 0.0
@@ -82,7 +84,6 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
 
                 # Types & hygiene (per chunk)
                 df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
-                # seconds → ms if needed, detect from this chunk
                 ts_len = int(df["ts"].dropna().astype(str).str.len().median()) if df["ts"].notna().any() else 13
                 if ts_len <= 10:
                     df["ts"] = (df["ts"] * 1000).astype("Int64")
@@ -92,7 +93,7 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
                 df = df.dropna(subset=["ts","price","qty"])
                 df = df[(df["price"] > 0) & (df["qty"] >= 0)]
 
-                # Month filter (per chunk, avoids keeping unrelated rows)
+                # Month filter (UTC)
                 ts_dt = pd.to_datetime(df["ts"], unit="ms", utc=True)
                 df = df[ts_dt.dt.strftime("%Y-%m").isin(months)]
 
@@ -106,7 +107,11 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
         raise FileNotFoundError(f"No rows matched requested months {months} under {path}")
 
     all_ticks = pd.concat(parts, ignore_index=True)
-    all_ticks = all_ticks.sort_values("ts").drop_duplicates(subset=["ts","price","qty"], keep="last").reset_index(drop=True)
+    all_ticks = (
+        all_ticks.sort_values("ts")
+                 .drop_duplicates(subset=["ts","price","qty"], keep="last")
+                 .reset_index(drop=True)
+    )
     return all_ticks
 
 def build_minute_bars(ticks: pd.DataFrame, interval: str = "1min") -> pd.DataFrame:
@@ -116,10 +121,10 @@ def build_minute_bars(ticks: pd.DataFrame, interval: str = "1min") -> pd.DataFra
     df = ticks.copy()
     df["ts_dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
 
-    # Resample by day for progress visibility
+    # Resample by day for visible progress
     df["day"] = df["ts_dt"].dt.normalize()
     bars = []
-    for day, g in tqdm(df.groupby("day"), desc="[Bars] Resampling by day", unit="day", dynamic_ncols=True, leave=False):
+    for day, g in tqdm(df.groupby("day"), desc="[Bars] Resampling by day", unit="day", dynamic_ncols=True, leave=False, position=2):
         g = g.set_index("ts_dt")
         o = g["price"].resample(interval).first()
         h = g["price"].resample(interval).max()
