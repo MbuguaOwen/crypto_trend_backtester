@@ -1,0 +1,13 @@
+.venv/
+*.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.csv
+*.egg-info/
+.DS_Store
+results/
+data/
+EOT
