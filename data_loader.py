@@ -1,7 +1,6 @@
 
 import os, glob
 from typing import List, Optional
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -31,13 +30,14 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
         raise FileNotFoundError(f"No CSV files found under {path}")
 
     parts = []
-    for f in tqdm(files, desc=f"[{symbol}] Loading CSVs", unit="file", dynamic_ncols=True):
-        # Try a faster engine if present, fallback gracefully
+    for f in tqdm(files, desc=f"[{symbol}] Loading CSVs", unit="file", dynamic_ncols=True, leave=False):
+        # 1) Read header only to map aliases once per file
         try:
-            df = pd.read_csv(f, engine="pyarrow")
+            hdr = pd.read_csv(f, nrows=0, engine="pyarrow")
         except Exception:
-            df = pd.read_csv(f, low_memory=False)
-        cols = list(df.columns)
+            hdr = pd.read_csv(f, nrows=0)
+        cols = list(hdr.columns)
+
         tcol = _find_col(cols, TIME_ALIASES)
         pcol = _find_col(cols, PRICE_ALIASES)
         qcol = _find_col(cols, QTY_ALIASES)
@@ -47,41 +47,66 @@ def load_ticks_for_months(symbol: str, data_dir: str, months: List[str]) -> pd.D
         if tcol is None or pcol is None:
             raise ValueError(f"{f}: Missing required columns (found: {cols}). Need timestamp & price aliases.")
 
-        df = df.rename(columns={tcol: "ts", pcol: "price"})
+        usecols = [tcol, pcol]
         if qcol is not None:
-            df = df.rename(columns={qcol: "qty"})
+            usecols.append(qcol)
         elif qqcol is not None:
-            df["qty"] = pd.to_numeric(df[qqcol], errors="coerce") / pd.to_numeric(df["price"], errors="coerce")
-        else:
-            df["qty"] = 0.0
-
+            usecols.append(qqcol)
         if mcol is not None:
-            df["is_buyer_maker"] = _coerce_bool(df[mcol])
-        else:
-            df["is_buyer_maker"] = False
+            usecols.append(mcol)
 
-        df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
-        ts_len = int(np.nanmedian(df["ts"].dropna().astype(str).str.len())) if df["ts"].notna().any() else 13
-        if ts_len <= 10:
-            df["ts"] = (df["ts"] * 1000).astype("Int64")
-        df["price"] = pd.to_numeric(df["price"], errors="coerce")
-        df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+        # 2) Stream the file in chunks to show progress
+        try:
+            it = pd.read_csv(f, usecols=usecols, chunksize=2_000_000, engine="pyarrow")
+        except Exception:
+            it = pd.read_csv(f, usecols=usecols, chunksize=2_000_000, low_memory=False)
 
-        df = df.dropna(subset=["ts","price","qty"])
-        df = df[(df["price"] > 0) & (df["qty"] >= 0)]
-        df = df.sort_values("ts").drop_duplicates(subset=["ts","price","qty"], keep="last")
+        buf = []
+        with tqdm(desc=f"[{symbol}] {os.path.basename(f)}", unit="rows", dynamic_ncols=True, leave=False) as pbar:
+            for chunk in it:
+                pbar.update(len(chunk))
 
-        ts_dt = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        df["yyyy_mm"] = ts_dt.dt.strftime("%Y-%m")
-        df = df[df["yyyy_mm"].isin(months)].drop(columns=["yyyy_mm"])
+                df = chunk.rename(columns={tcol: "ts", pcol: "price"})
+                if qcol is not None:
+                    df = df.rename(columns={qcol: "qty"})
+                elif qqcol is not None:
+                    # derive qty from quote_qty / price
+                    df["qty"] = pd.to_numeric(df[qqcol], errors="coerce") / pd.to_numeric(df["price"], errors="coerce")
+                else:
+                    df["qty"] = 0.0
 
-        parts.append(df[["ts","price","qty","is_buyer_maker"]])
+                if mcol is not None:
+                    df["is_buyer_maker"] = _coerce_bool(df[mcol])
+                else:
+                    df["is_buyer_maker"] = False
+
+                # Types & hygiene (per chunk)
+                df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+                # seconds → ms if needed, detect from this chunk
+                ts_len = int(df["ts"].dropna().astype(str).str.len().median()) if df["ts"].notna().any() else 13
+                if ts_len <= 10:
+                    df["ts"] = (df["ts"] * 1000).astype("Int64")
+                df["price"] = pd.to_numeric(df["price"], errors="coerce")
+                df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+
+                df = df.dropna(subset=["ts","price","qty"])
+                df = df[(df["price"] > 0) & (df["qty"] >= 0)]
+
+                # Month filter (per chunk, avoids keeping unrelated rows)
+                ts_dt = pd.to_datetime(df["ts"], unit="ms", utc=True)
+                df = df[ts_dt.dt.strftime("%Y-%m").isin(months)]
+
+                if not df.empty:
+                    buf.append(df[["ts","price","qty","is_buyer_maker"]])
+
+        if buf:
+            parts.append(pd.concat(buf, ignore_index=True))
 
     if not parts:
         raise FileNotFoundError(f"No rows matched requested months {months} under {path}")
 
     all_ticks = pd.concat(parts, ignore_index=True)
-    all_ticks = all_ticks.sort_values("ts").reset_index(drop=True)
+    all_ticks = all_ticks.sort_values("ts").drop_duplicates(subset=["ts","price","qty"], keep="last").reset_index(drop=True)
     return all_ticks
 
 def build_minute_bars(ticks: pd.DataFrame, interval: str = "1min") -> pd.DataFrame:
@@ -90,16 +115,26 @@ def build_minute_bars(ticks: pd.DataFrame, interval: str = "1min") -> pd.DataFra
 
     df = ticks.copy()
     df["ts_dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-    df = df.set_index("ts_dt")
 
-    o = df["price"].resample(interval).first()
-    h = df["price"].resample(interval).max()
-    l = df["price"].resample(interval).min()
-    c = df["price"].resample(interval).last()
-    v = df["qty"].resample(interval).sum()
+    # Resample by day for progress visibility
+    df["day"] = df["ts_dt"].dt.normalize()
+    bars = []
+    for day, g in tqdm(df.groupby("day"), desc="[Bars] Resampling by day", unit="day", dynamic_ncols=True, leave=False):
+        g = g.set_index("ts_dt")
+        o = g["price"].resample(interval).first()
+        h = g["price"].resample(interval).max()
+        l = g["price"].resample(interval).min()
+        c = g["price"].resample(interval).last()
+        v = g["qty"].resample(interval).sum()
+        out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
+        if not out.empty:
+            out["day"] = day
+            bars.append(out)
 
-    out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}).dropna()
-    out = out.reset_index()
+    if not bars:
+        return pd.DataFrame(columns=["ts","open","high","low","close","volume"])
+
+    out = pd.concat(bars).reset_index()
     out["ts"] = (out["ts_dt"].view("int64") // 1_000_000).astype("int64")
-    out = out.drop(columns=["ts_dt"])
-    return out[["ts","open","high","low","close","volume"]].sort_values("ts").reset_index(drop=True)
+    out = out.drop(columns=["ts_dt","day"]).sort_values("ts").reset_index(drop=True)
+    return out[["ts","open","high","low","close","volume"]]
