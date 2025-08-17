@@ -66,6 +66,10 @@ def _resample_tf(df1m: pd.DataFrame, tf: str) -> pd.DataFrame:
     if v is not None: out['volume'] = v
     return pd.DataFrame(out).dropna(how='any')
 
+def _last_closed(ts, df_tf):
+    sub = df_tf[df_tf.index <= ts]
+    return None if sub.empty else sub.index[-1]
+
 @dataclass
 class TradeRow:
     ts_open: int
@@ -108,6 +112,12 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
     # precompute resamples at full length; we'll slice per bar
     resampled = {tf: _resample_tf(df1m, tf) for tf in tf_defs.keys()}
 
+    htf_tfs = cfg.get('strategy', {}).get('regime_htf', {}).get('timeframes', [])
+    resampled_htf = {tf: _resample_tf(df1m, tf) for tf in htf_tfs}
+    macro_state = "FLAT"
+    macro_bar_close_ts = None
+    features_version = 0
+
     regime = TSMOMRegime(cfg)
     trigger = BreakoutAfterCompression(cfg)
     risk = RiskManager(cfg)
@@ -133,17 +143,44 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
         # 1) history slice up to current bar inclusive
         df_hist = df1m.iloc[:i+1]
 
+        # HTF macro update once per closed bar
+        ts_now = df_hist.index[-1]
+        updated = False
+        if htf_tfs:
+            tf_hist_htf = {}
+            htf_close_anchors = []
+            for tf in htf_tfs:
+                anchor = _last_closed(ts_now, resampled_htf[tf])
+                if anchor is None:
+                    tf_hist_htf = None
+                    break
+                htf_close_anchors.append(anchor)
+                lookback = cfg['strategy']['tsmom_regime']['timeframes']['1m']['lookback_closes']
+                tf_hist_htf[tf] = resampled_htf[tf][resampled_htf[tf].index <= anchor].tail(lookback)
+            if tf_hist_htf is not None:
+                new_anchor = max(htf_close_anchors)
+                if (macro_bar_close_ts is None) or (new_anchor > macro_bar_close_ts):
+                    macro_state = regime.classify(tf_hist_htf)
+                    macro_bar_close_ts = new_anchor
+                    features_version += 1
+                    updated = True
+
         # 2) regime on TF slices with lookback windows
         tf_hist = {}
         for tf, meta in tf_defs.items():
             df_tf = resampled[tf]
-            # align by time <= current bar
             df_tf_hist = df_tf[df_tf.index <= df_hist.index[-1]]
             tf_hist[tf] = df_tf_hist.tail(meta['lookback_closes'])
         state = regime.classify(tf_hist)
 
-        # 3) trigger
-        sig = trigger.check(df_hist, state) if state in ('LONG', 'SHORT') else None
+        if macro_state == "LONG":
+            micro_ok = (state == "LONG")
+        elif macro_state == "SHORT":
+            micro_ok = (state == "SHORT")
+        else:
+            micro_ok = False
+
+        sig = trigger.check(df_hist, state) if micro_ok else None
 
         # 4) entries
         if open_trade is None and sig is not None:
@@ -161,9 +198,31 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
                 qty = ensure_min_qty_like_live(entry_px, qty, constraints)
                 if qty > 0:
                     open_trade = Trade(symbol=symbol, side=side, entry_price=entry_px, qty=qty, sl=sl, tp=tp, ts_open=ts_open_ms,
-                                       meta={'entry_reason': sig['reason'], 'initial_sl': sl})
+                                       meta={
+                                           'entry_reason': sig['reason'],
+                                           'initial_sl': sl,
+                                           'macro_state_at_entry': macro_state,
+                                           'macro_bar_close_ts': int(macro_bar_close_ts.timestamp()*1000) if macro_bar_close_ts else None,
+                                           'features_version': features_version
+                                       })
                     highs_since_entry = float(df_hist['high'].iloc[-1])
                     lows_since_entry  = float(df_hist['low'].iloc[-1])
+
+        if open_trade is not None and htf_tfs:
+            if (open_trade.side == "LONG" and macro_state == "SHORT") or (open_trade.side == "SHORT" and macro_state == "LONG"):
+                act = cfg['strategy']['macro_flip']['action']
+                if act == "flatten":
+                    exit_px = float(df1m['close'].iloc[i])
+                    fee_frac = utils.bps_to_frac(cfg['exchange']['taker_fee_bps'])
+                    pnl_gross = (exit_px - open_trade.entry_price)*open_trade.qty if open_trade.side=="LONG" else (open_trade.entry_price - exit_px)*open_trade.qty
+                    pnl = pnl_gross - fee_frac*open_trade.entry_price*open_trade.qty - fee_frac*exit_px*open_trade.qty
+                    rows.append(TradeRow(open_trade.ts_open, int(df1m.index[i].timestamp()*1000), symbol, open_trade.side,
+                                         open_trade.entry_price, exit_px, open_trade.qty, float(pnl), "MACRO_FLIP", open_trade.meta.get('entry_reason','')))
+                    open_trade = None
+                    highs_since_entry = lows_since_entry = None
+                    continue
+                elif act == "tighten" and open_trade is not None:
+                    cfg['risk']['stops']['trailing']['trail_atr_mult_default'] = max(0.5, cfg['strategy']['macro_flip'].get('tighten_tsl_mult', 2.0))
 
         # 5) maintenance and 6) exits
         if open_trade is not None:
@@ -217,41 +276,34 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
 
 
 def summarize(df: pd.DataFrame, sym: str, out_dir: str = "outputs"):
-    import numpy as np, os
+    import numpy as np, os, pandas as pd
     os.makedirs(out_dir, exist_ok=True)
-    total = len(df)
+    total = int(len(df))
     counts = df.groupby("exit_type").size().reindex(["TP","TSL","SL","BE"], fill_value=0)
-    wins   = counts["TP"] + counts["TSL"]
-    losses = counts["SL"]
-    winrate = float(wins) / max(1, wins + losses)
+    wins   = int(counts["TP"] + counts["TSL"])
+    losses = int(counts["SL"])
+    breaks = int(counts["BE"])
 
-    pnl_total = float(df["pnl"].sum()) if total else 0.0
+    net = float(df["pnl"].sum()) if total else 0.0
+    exp = float(df["pnl"].mean()) if total else 0.0
     avg_win = float(df.loc[df["pnl"] > 0, "pnl"].mean() or 0.0)
-    avg_loss = float(-df.loc[df["pnl"] < 0, "pnl"].mean() or 0.0)
-    expectancy = winrate * avg_win - (1.0 - winrate) * avg_loss
+    avg_loss = float(df.loc[df["pnl"] < 0, "pnl"].mean() or 0.0)
 
-    summary = {
-        "symbol": sym,
-        "trades": int(total),
+    out = {
+        "symbol": sym, "trades": total,
         "TP": int(counts["TP"]), "TSL": int(counts["TSL"]),
         "SL": int(counts["SL"]), "BE": int(counts["BE"]),
-        "wins": int(wins), "losses": int(losses),
-        "win_rate": round(winrate, 4),
-        "net_pnl": round(pnl_total, 2),
-        "avg_win": round(avg_win, 2),
-        "avg_loss": round(avg_loss, 2),
-        "expectancy": round(expectancy, 4),
+        "win_rate_incl_tsl": round(wins / max(1, total), 4),
+        "net_pnl": round(net, 2),
+        "expectancy_per_trade": round(exp, 4),
+        "avg_win": round(avg_win, 4),
+        "avg_loss": round(avg_loss, 4),
     }
 
-    # print to console
-    print(f"\n[{sym}] trades={summary['trades']} | TP={summary['TP']} TSL={summary['TSL']} "
-          f"SL={summary['SL']} BE={summary['BE']} | win_rate={summary['win_rate']:.3f} "
-          f"net_pnl={summary['net_pnl']:.2f} exp={summary['expectancy']:.4f}")
-
-    # save CSV
-    import pandas as pd
-    pd.DataFrame([summary]).to_csv(os.path.join(out_dir, f"{sym}_summary.csv"), index=False)
-    return summary
+    print(f"\n[{sym}] trades={total} | TP={out['TP']} TSL={out['TSL']} SL={out['SL']} BE={out['BE']} "
+          f"| win={out['win_rate_incl_tsl']:.3f} net={out['net_pnl']:.2f} exp/trade={out['expectancy_per_trade']:.4f}")
+    pd.DataFrame([out]).to_csv(os.path.join(out_dir, f"{sym}_summary.csv"), index=False)
+    return out
 
 def main():
     ap = argparse.ArgumentParser(description="TSMOM Parity Backtest Harness")

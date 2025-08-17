@@ -30,6 +30,14 @@ strategy:
       short_threshold: -0.6
       neutral_buffer:  0.0
 
+  regime_htf:
+    timeframes: ["1h", "4h", "1d"]
+    freeze_on_close: true
+
+  macro_flip:
+    action: "flatten"
+    tighten_tsl_mult: 2.0
+
   trigger:
     gating:
       require_recent_compression: true
@@ -113,5 +121,5 @@ backtest:
     trades_csv: "outputs/{symbol}_trades_parity.csv"
 
   simulator:
-    entry_fill: close        # "close" or "next_open"
+    entry_fill: next_open        # "close" or "next_open"
     slippage_bps: 0
