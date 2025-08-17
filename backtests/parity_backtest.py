@@ -212,6 +212,44 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
     out_df.to_csv(out_path, index=False)
     return out_df
 
+
+def summarize(df: pd.DataFrame, sym: str, out_dir: str = "outputs"):
+    import numpy as np, os
+    os.makedirs(out_dir, exist_ok=True)
+    total = len(df)
+    counts = df.groupby("exit_type").size().reindex(["TP","TSL","SL","BE"], fill_value=0)
+    wins   = counts["TP"] + counts["TSL"]
+    losses = counts["SL"]
+    winrate = float(wins) / max(1, wins + losses)
+
+    pnl_total = float(df["pnl"].sum()) if total else 0.0
+    avg_win = float(df.loc[df["pnl"] > 0, "pnl"].mean() or 0.0)
+    avg_loss = float(-df.loc[df["pnl"] < 0, "pnl"].mean() or 0.0)
+    expectancy = winrate * avg_win - (1.0 - winrate) * avg_loss
+
+    summary = {
+        "symbol": sym,
+        "trades": int(total),
+        "TP": int(counts["TP"]), "TSL": int(counts["TSL"]),
+        "SL": int(counts["SL"]), "BE": int(counts["BE"]),
+        "wins": int(wins), "losses": int(losses),
+        "win_rate": round(winrate, 4),
+        "net_pnl": round(pnl_total, 2),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "expectancy": round(expectancy, 4),
+    }
+
+    # print to console
+    print(f"\n[{sym}] trades={summary['trades']} | TP={summary['TP']} TSL={summary['TSL']} "
+          f"SL={summary['SL']} BE={summary['BE']} | win_rate={summary['win_rate']:.3f} "
+          f"net_pnl={summary['net_pnl']:.2f} exp={summary['expectancy']:.4f}")
+
+    # save CSV
+    import pandas as pd
+    pd.DataFrame([summary]).to_csv(os.path.join(out_dir, f"{sym}_summary.csv"), index=False)
+    return summary
+
 def main():
     ap = argparse.ArgumentParser(description="TSMOM Parity Backtest Harness")
     ap.add_argument('--config', default='configs/default.yaml', help='Config YAML path')
@@ -226,6 +264,7 @@ def main():
     for sym in symbols:
         out_path = args.out or cfg['backtest']['output']['trades_csv'].replace('{symbol}', sym)
         df = run_symbol(cfg, sym, out_path)
+        summarize(df, sym)
         df['symbol'] = sym
         combined.append(df)
 
