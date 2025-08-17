@@ -1,6 +1,7 @@
 import os, glob, pandas as pd
 from datetime import datetime, timezone
 from tqdm.auto import tqdm
+from dateutil.parser import isoparse
 
 def _ensure_ts_index(df: pd.DataFrame):
     # Normalize columns to lowercase for robustness
@@ -24,22 +25,29 @@ def _ensure_ts_index(df: pd.DataFrame):
             return False
         return y.str.fullmatch(r"[-+]?\d+(\.\d+)?").all()
 
+    # --- Numeric epochs (s/ms, incl. fractional seconds) ---
     if _is_numbery(s):
-        # epoch seconds or milliseconds; allow fractional seconds
         ser = pd.to_numeric(s, errors='coerce')
         med = ser.dropna().median()
         if pd.isna(med):
             raise ValueError(f"Timestamp column '{col}' could not be parsed as numeric.")
         if med > 1e11:  # clearly ms
             ts = pd.to_datetime(ser, unit='ms', utc=True)
-        else:          # seconds (possibly fractional)
+        else:           # seconds (possibly fractional)
             ts = pd.to_datetime((ser * 1000).astype('int64'), unit='ms', utc=True)
+
+    # --- ISO strings (with/without microseconds, with timezones) ---
     else:
-        # ISO strings, possibly with microseconds and timezone
         s_str = s.astype(str).str.replace('Z', '+00:00', regex=False).str.strip()
+
+        # 1) Generic parse
         ts = pd.to_datetime(s_str, utc=True, errors='coerce')
+
+        # 2) If any NaNs, try strptime fallbacks (Python's %z wants +HHMM, no colon)
         if ts.isna().any():
-            # targeted fallbacks
+            # normalize +HH:MM → +HHMM for strptime-based formats
+            s_no_colon = s_str.str.replace(r'([+-]\d{2}):(\d{2})$', r'\1\2', regex=True)
+
             fmts = [
                 "%Y-%m-%d %H:%M:%S.%f%z",
                 "%Y-%m-%d %H:%M:%S%z",
@@ -48,10 +56,22 @@ def _ensure_ts_index(df: pd.DataFrame):
             ]
             best = ts
             for fmt in fmts:
-                try_ts = pd.to_datetime(s_str, format=fmt, utc=True, errors='coerce')
+                try_ts = pd.to_datetime(s_no_colon, format=fmt, utc=True, errors='coerce')
                 if try_ts.notna().sum() > best.notna().sum():
                     best = try_ts
             ts = best
+
+        # 3) If still NaNs, do a surgical per-row parse via dateutil.isoparse
+        if ts.isna().any():
+            idx_na = ts[ts.isna()].index
+            parsed = []
+            for i in idx_na:
+                val = str(s.loc[i]).strip()
+                try:
+                    parsed.append(pd.Timestamp(isoparse(val)).tz_convert('UTC'))
+                except Exception:
+                    parsed.append(pd.NaT)
+            ts.loc[idx_na] = parsed
 
     if ts.isna().any():
         bad = int(ts.isna().sum())
