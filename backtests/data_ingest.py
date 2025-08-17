@@ -9,14 +9,13 @@ def _ensure_ts_index(df: pd.DataFrame):
 
     # Candidate timestamp columns (most common first)
     candidates = ['timestamp', 'timestamp_ms', 'ts', 'time', 'date', 'datetime']
-
     col = next((c for c in candidates if c in df.columns), None)
     if col is None:
         raise ValueError("No timestamp-like column found (expected one of: timestamp, timestamp_ms, ts, time, date, datetime)")
 
     s = df[col]
 
-    # Helper to detect digit / float-like strings
+    # Detect numeric (int/float) or number-like strings
     def _is_numbery(x):
         if getattr(x, "dtype", None) is not None and x.dtype.kind in 'ifb':
             return True
@@ -31,7 +30,7 @@ def _ensure_ts_index(df: pd.DataFrame):
         med = ser.dropna().median()
         if pd.isna(med):
             raise ValueError(f"Timestamp column '{col}' could not be parsed as numeric.")
-        if med > 1e11:  # clearly in ms
+        if med > 1e11:  # clearly ms
             ts = pd.to_datetime(ser, unit='ms', utc=True)
         else:          # seconds (possibly fractional)
             ts = pd.to_datetime((ser * 1000).astype('int64'), unit='ms', utc=True)
@@ -56,7 +55,6 @@ def _ensure_ts_index(df: pd.DataFrame):
 
     if ts.isna().any():
         bad = int(ts.isna().sum())
-        # Find a failing example (if any non-empty)
         ex_idx = ts.isna().to_numpy().nonzero()[0]
         example = s.iloc[ex_idx[0]] if len(ex_idx) else s.iloc[0]
         raise ValueError(f"Failed to parse {bad} timestamps in column '{col}'. Example: {example}")
@@ -81,18 +79,16 @@ def from_tick_csv(path: str, chunksize: int | None = None, show_progress: bool =
     #   time:    timestamp | timestamp_ms | ts | time | date | datetime  (epoch s/ms or ISO)
     #   price:   price | p | last_price
     #   qty:     qty | size | q | amount | volume (optional)
+
     if chunksize is None or chunksize <= 0:
-        # Fallback to simple mode (small files)
+        # Simple path for small files
         df = pd.read_csv(path)
         df = _ensure_ts_index(df)
-        price_col = None
-        for cand in ['price','p','last_price']:
-            if cand in df.columns: price_col = cand; break
+        price_col = next((c for c in ['price','p','last_price'] if c in df.columns), None)
         if price_col is None:
             raise ValueError(f"No price column found in {path}; expected one of: price, p, last_price")
-        qty_col = None
-        for cand in ['qty','size','q','amount','volume']:
-            if cand in df.columns: qty_col = cand; break
+        qty_col = next((c for c in ['qty','size','q','amount','volume'] if c in df.columns), None)
+
         p = df[price_col].astype(float)
         o = p.resample('1min').first()
         h = p.resample('1min').max()
@@ -105,21 +101,18 @@ def from_tick_csv(path: str, chunksize: int | None = None, show_progress: bool =
 
     # Chunked path
     frames = []
-    # iterator so we can get chunks progressively
     it = pd.read_csv(path, chunksize=chunksize)
     pbar = tqdm(it, desc=os.path.basename(path), unit="chunk", disable=(not show_progress))
     price_col, qty_col = None, None
     for chunk in pbar:
         chunk = _ensure_ts_index(chunk)
-        # detect cols once
         if price_col is None:
-            for cand in ['price','p','last_price']:
-                if cand in chunk.columns: price_col = cand; break
+            price_col = next((c for c in ['price','p','last_price'] if c in chunk.columns), None)
             if price_col is None:
                 raise ValueError(f"No price column found in {path}; expected one of: price, p, last_price")
         if qty_col is None:
-            for cand in ['qty','size','q','amount','volume']:
-                if cand in chunk.columns: qty_col = cand; break
+            qty_col = next((c for c in ['qty','size','q','amount','volume'] if c in chunk.columns), None)
+
         p = chunk[price_col].astype(float)
         o = p.resample('1min').first()
         h = p.resample('1min').max()
@@ -138,13 +131,7 @@ def from_tick_csv(path: str, chunksize: int | None = None, show_progress: bool =
         raise ValueError(f"Empty tick file: {path}")
 
     merged = pd.concat(frames, axis=0).sort_index()
-    # Combine duplicate minutes across chunks
-    agg = {
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }
+    agg = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}
     if 'volume' in merged.columns:
         agg['volume'] = 'sum'
     merged = merged.groupby(level=0).agg(agg)
@@ -173,33 +160,41 @@ def load_1m_df_for_range(symbol: str, cfg: dict) -> pd.DataFrame:
     cand_paths = []
     if typ == 'ohlcv_csv':
         for m in months:
-            path = path_pattern.format(symbol=symbol, **m)
-            if os.path.exists(path):
-                frames.append(from_ohlcv_csv(path))
-        if not frames:
-            # fallback to bundled sample
-            fallback = f"inputs/{symbol}/sample_1m.csv"
-            if os.path.exists(fallback):
-                frames.append(from_ohlcv_csv(fallback))
+            cand_paths.append(path_pattern.format(symbol=symbol, **m))
     elif typ == 'tick_csv':
-        chunksize = bt['inputs'].get('tick_chunksize', None)
-        showp = cfg['backtest']['progress_bar']
         for m in months:
             if tick_pattern:
-                path = tick_pattern.format(symbol=symbol, **m)
-                if os.path.exists(path):
+                cand_paths.append(tick_pattern.format(symbol=symbol, **m))
+            cand_paths.append(f"inputs/{symbol}/{symbol}-ticks-{m['yyyy']}-{m['mm']}.csv")
+    else:
+        raise ValueError(f"Unknown inputs.type: {typ}")
+
+    file_paths = [p for p in cand_paths if os.path.exists(p)]
+    frames = []
+
+    if not file_paths:
+        fallback = f"inputs/{symbol}/sample_1m.csv" if typ == 'ohlcv_csv' else f"inputs/{symbol}/sample_ticks.csv"
+        if os.path.exists(fallback):
+            file_paths = [fallback]
+
+    if not file_paths:
+        raise FileNotFoundError("No data files found for the requested range.")
+
+    # Progress over files
+    pbar = tqdm(total=len(file_paths), desc=f"{symbol}:load", unit="file", disable=(not cfg['backtest']['progress_bar']))
+    try:
+        for path in file_paths:
+            try:
+                if typ == 'ohlcv_csv':
+                    frames.append(from_ohlcv_csv(path))
+                else:
+                    chunksize = bt['inputs'].get('tick_chunksize', None)
+                    showp = cfg['backtest']['progress_bar']
                     frames.append(from_tick_csv(path, chunksize=chunksize, show_progress=showp))
-            # also allow default alt location
-            alt = f"inputs/{symbol}/{symbol}-ticks-{m['yyyy']}-{m['mm']}.csv"
-            if os.path.exists(alt):
-                frames.append(from_tick_csv(alt, chunksize=chunksize, show_progress=showp))
-        if not frames:
-            fallback = f"inputs/{symbol}/sample_ticks.csv"
-            if os.path.exists(fallback):
-                frames.append(from_tick_csv(fallback, chunksize=chunksize, show_progress=showp))
-        finally:
-            pbar.update(1)
-    pbar.close()
+            finally:
+                pbar.update(1)
+    finally:
+        pbar.close()
 
     df = pd.concat(frames, axis=0).sort_index()
     df = df[(df.index >= start) & (df.index < end)]
