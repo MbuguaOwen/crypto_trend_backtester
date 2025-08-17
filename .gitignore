@@ -72,7 +72,7 @@ logs/
 # Project data & outputs
 # (keep placeholders)
 # ---------------------------
-data/
+inputs/
   BTCUSDT/
   ETHUSDT/
   SOLUSDT/

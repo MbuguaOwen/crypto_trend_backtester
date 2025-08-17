@@ -1,151 +1,78 @@
-# Multi-Horizon Crypto Backtesting System (TSMOM)
+# TSMOM Parity Backtest — Live 1:1 Mirror (Harness)
 
-A production-grade, event-driven backtester for multi-horizon trend-following with volatility targeting and breakout confirmation.
-Designed to run on 7 months of **tick data (Jan–Jul 2025)** for **ETHUSDT, BTCUSDT, SOLUSDT** and **never** crash with `KeyError: 'qty'`.
+This zip contains a thin, deterministic **backtest harness** that executes your **live modules** on historical 1‑minute bars, preserving **order-of-operations** and exit taxonomy (**SL / TP / BE / TSL**).
 
----
+> **Parity principle:** Swap the files in `core_reuse/` with your *actual live* `regime.py`, `trigger.py`, `risk.py`, `trade.py`, and the real helper that mirrors `CcxtExchange._ensure_min_qty` to achieve **bit-for-bit parity**. The bundled versions are faithful **shims** so this zip runs locally without secrets.
 
-## ✅ Key Guarantees
-
-- **No `KeyError: 'qty'`**: The new `data_loader.py` maps *any* reasonable quantity/volume column to `qty`, e.g. `quantity`, `volume`, `size`, `vol`, `q`, and can **derive** it from `quote_qty / price` when only notional is present.
-- **Schema-flexible loader**: Robust column detection for `timestamp`, `price`, `qty`, and `is_buyer_maker` with thorough validation & cleaning.
-- **Event-driven engine**: Simulated BAR ➜ SIGNAL ➜ ORDER ➜ FILL flow with **fees, slippage, and latency**.
-- **Warmup gate**: No signal generation or trading until **all lookback windows** (momentum/vol/breakout) are fully populated.
-- **Progress bars**: TQDM bars for loading and for backtest processing per symbol.
-
----
-
-## 📂 Project Structure
-
-```
-backtester/
-  __init__.py
-  engine.py
-  portfolio.py
-  execution.py
-  events.py
-  utils/
-    __init__.py
-    math.py
-    time.py
-backtest_multi_horizon.py
-data_loader.py
-strategy.py
-configs/
-  backtest.yaml
-data/
-  BTCUSDT/ ETHUSDT/ SOLUSDT/
-results/
-README.md
-```
-
----
-
-## 📊 Expected Tick CSV Schema
-
-The loader is **flexible**. It tries to find columns **case-insensitively**:
-
-- **timestamp**: one of `timestamp`, `ts`, `time`, `T`, `event_time`, `trade_time_ms`, `trade_time`
-- **price**: one of `price`, `p`, `last_price`, `rate`
-- **qty (base units)**: one of `qty`, `quantity`, `amount`, `size`, `vol`, `volume`, `q`, `trade_quantity`, `last_qty`
-- **quote_qty (notional)**: one of `quote_qty`, `quoteQuantity`, `qv`, `amount_quote`, `notional`
-- **maker flag (optional)**: one of `is_buyer_maker`, `isBuyerMaker`, `maker`, `is_maker`, `is_seller_maker`
-
-If **`qty` is missing**:
-- If we have `quote_qty` **and** `price`, we compute `qty = quote_qty / price`.
-- Otherwise, the file is flagged with a clear error message (not a `KeyError`), pointing to the missing fields.
-
-The CSV filename can be anything. We recommend putting files under:
-```
-data/{SYMBOL}/*2025-01*.csv
-data/{SYMBOL}/*2025-02*.csv
-...
-data/{SYMBOL}/*2025-07*.csv
-```
-The loader scans all CSVs under each symbol directory and uses an internal filter for months.
-
----
-
-## 🧮 Strategy (TSMOM + Breakout + Vol Target)
-
-- **Momentum**: sign-weighted composite of multiple lookbacks (minutes). Example: `[60, 240, 720, 1440]`.
-- **Breakout confirmation**: Donchian channel over `breakout_lookback` bars; trades only if price breaks the prior high/low consistent with momentum sign.
-- **Vol targeting**: Scales position size using realized volatility (EWMA of log-returns) to target annualized volatility. Clipped by `max_leverage`.
-
-> **Safety gate**: No signals until `max(momentum_windows) + breakout_lookback + vol_window` bars have occurred.
-
----
-
-## ⚙️ Configuration
-
-Edit `configs/backtest.yaml`. Key fields:
-
-```yaml
-data:
-  data_dir: ./data
-  symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
-  months: ["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07"]
-  resample_interval: "1min"
-
-broker:
-  initial_capital: 100000
-  taker_fee_bps: 7.5
-  slippage_bps: 1.5
-  latency_ms: 500
-
-strategy:
-  momentum_windows: [60, 240, 720, 1440]
-  breakout_lookback: 300
-  vol_window: 1440
-  target_vol_annual: 0.30
-  max_leverage: 3.0
-```
-
----
-
-## ▶️ How to Run
-
-1. **Install deps**:
+## Quickstart
 
 ```bash
-python -m venv .venv && source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-pip install -U pandas numpy pyyaml tqdm
+# 1) (optional) create venv
+python -m venv .venv && . .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# 2) install deps
+pip install -r requirements.txt
+
+# 3) run default (Jan–Jul 2025 from configs/default.yaml), all symbols
+python -m backtests.parity_backtest --config configs/default.yaml
+
+# 4) run single symbol and custom out
+python -m backtests.parity_backtest --config configs/default.yaml --symbol BTCUSDT --out outputs/BTCUSDT_trades_parity.csv
 ```
 
-2. **Place your tick CSVs** under `data/{SYMBOL}/` for the months Jan–Jul 2025.
+If no monthly files exist at `backtest.inputs.path_pattern`, the harness falls back to `inputs/{symbol}/sample_1m.csv` so you can test the flow end-to-end.
 
-3. **Run**:
+## What to swap for **true parity**
 
-```bash
-python backtest_multi_horizon.py --config configs/backtest.yaml --results-dir results
+Replace the shims in `core_reuse/` with your live engine modules:
+
+- `regime.py` → contains `class TSMOMRegime`
+- `trigger.py` → contains `class BreakoutAfterCompression` (Donchian **prior-bar** + ATR buffer; compression gate)
+- `risk.py` → `class RiskManager` with your ATR + sizing + initial SL/TP
+- `trade.py` → `class Trade` with **BE** and **TSL** lifecycle
+- `execution_helpers.py` → factor out live `_ensure_min_qty` math and import here
+
+No other changes required. The harness calls the exact interface you specified.
+
+## Config (single source of truth)
+
+Edit `configs/default.yaml`. It contains **strategy**, **risk**, **execution**, and **backtest** blocks. The backtest window defaults to **2025‑01‑01 → 2025‑08‑01** (Jan–Jul 2025). Toggle the progress bar via `backtest.progress_bar`.
+
+Per‑symbol exchange constraints (minQty, step, minNotional) are provided under `symbols.*` and are consumed by `ensure_min_qty_like_live(...)` in backtests.
+
+## Data
+
+Set:
+- `backtest.inputs.type`: `ohlcv_csv` (default) or `tick_csv`
+- `backtest.inputs.path_pattern`: e.g. `data/{symbol}/1m/{yyyymm}.csv`
+- `backtest.inputs.tick_path_pattern`: e.g. `data/{symbol}/ticks/{yyyymm}.csv`
+
+The loader stitches monthly shards across the configured start/end and **clips** to the window. All timestamps are treated as **UTC**.
+
+## Determinism and **no‑peek** rules
+
+- Work stream = **1m bars**; downsampling builds regime timeframes from the same history **≤ current bar**, never future data.
+- **Donchian** uses **prior bar** high/low plus an **ATR buffer** (as in live).
+- Entries are discrete; at most **one open trade** per symbol.
+- **BE/TSL** maintenance occurs **before** exit checks on every bar.
+- Fees applied on both entry and exit. Slippage is deterministic if configured (default 0 bps).
+
+## Output schema
+
+One row per closed trade:
+
+```
+ts_open, ts_close, symbol, side, entry, exit, qty, pnl, exit_type, entry_reason
 ```
 
-You’ll see progress bars for loading and simulation. Outputs:
-- `results/{SYMBOL}_trades.csv`
-- `results/{SYMBOL}_equity.csv`
-- `results/summary.csv`
+`exit_type ∈ {SL, TP, BE, TSL}`, `entry_reason ∈ {"donchian_breakout","ksigma_breakout"}`.
 
----
+## Tests
 
-## 🧰 How `KeyError: 'qty'` Was Solved
+Run `pytest` to validate warmup gating and basic taxonomy. Tests pass with the shims; they’ll remain green when you swap in your live modules if interfaces match.
 
-**Root cause:** Hard-coded assumption that the volume column is named `qty`.
+## Notes
 
-**Solution:** In `data_loader.py`, we:
-1. **Map columns case-insensitively** from a set of known aliases (see above).
-2. **Derive** `qty` as `quote_qty / price` if only notional is present.
-3. **Validate** and **sanitize** data (drop NaNs, non-positive price/qty, de-duplicate).
-4. **Standardize** to canonical columns: `ts` (int ms), `price` (float), `qty` (float), `is_buyer_maker` (bool).
-5. Build **minute bars** consistently across all symbols.
-
-Therefore, no `KeyError` occurs; if essential fields are missing, the loader raises a **clear, actionable ValueError** with context.
-
----
-
-## 🧪 Notes
-
-- The backtester is **event-driven** and **symbol-isolated** for clarity. Extending to cross-asset synchronization is straightforward.
-- Signals are **suppressed during warmup** by design.
-- If a month has no data, the engine skips gracefully with a warning.
-
-Happy testing. Ship alpha. 🚀
+- To mirror **next bar** fills, set `backtest.simulator.entry_fill: next_open`.
+- For exact parity on exchange constraints, port your live `_ensure_min_qty` math into `core_reuse/execution_helpers.py`.
+- If your live stops/trailing use per‑symbol overrides, place them under `symbols.<SYM>.stops` in the config.
