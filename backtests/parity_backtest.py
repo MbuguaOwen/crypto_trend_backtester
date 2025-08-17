@@ -44,7 +44,7 @@ def warmup_bars_required(cfg: dict) -> int:
         don['donchian_lookback'] + 1,
         kcfg['mean_window'] if kcfg.get('enabled', False) else 0,
         kcfg['stdev_window'] if kcfg.get('enabled', False) else 0,
-        cfg['risk']['atr']['window'] + cfg['risk']['atr']['ema_halflife_bars']
+        cfg['risk']['atr']['window'] + 1 + cfg['risk']['atr']['ema_halflife_bars']
     )
     return int(warm)
 
@@ -151,16 +151,19 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
             atr_val = risk.compute_atr(df_hist[['high','low','close']], cfg['risk']['atr']['window'],
                                        smoothing=cfg['risk']['atr']['smoothing'],
                                        ema_halflife_bars=cfg['risk']['atr']['ema_halflife_bars'])
-            side = 'LONG' if sig['direction'] == 'long' else 'SHORT'
-            symcfg = cfg['symbols'].get(symbol, {})
-            sl, tp = risk.initial_levels(side, entry_px, atr_val, symcfg)
-            qty = risk.position_size_units(equity_usd, entry_px, sl, taker_bps, side, max_lev)
-            qty = ensure_min_qty_like_live(entry_px, qty, constraints)
-            if qty > 0:
-                open_trade = Trade(symbol=symbol, side=side, entry_price=entry_px, qty=qty, sl=sl, tp=tp, ts_open=ts_open_ms,
-                                   meta={'entry_reason': sig['reason'], 'initial_sl': sl})
-                highs_since_entry = float(df_hist['high'].iloc[-1])
-                lows_since_entry  = float(df_hist['low'].iloc[-1])
+            if not (atr_val == atr_val):  # NaN check
+                pass
+            else:
+                side = 'LONG' if sig['direction'] == 'long' else 'SHORT'
+                symcfg = cfg['symbols'].get(symbol, {})
+                sl, tp = risk.initial_levels(side, entry_px, atr_val, symcfg)
+                qty = risk.position_size_units(equity_usd, entry_px, sl, taker_bps, side, max_lev)
+                qty = ensure_min_qty_like_live(entry_px, qty, constraints)
+                if qty > 0:
+                    open_trade = Trade(symbol=symbol, side=side, entry_price=entry_px, qty=qty, sl=sl, tp=tp, ts_open=ts_open_ms,
+                                       meta={'entry_reason': sig['reason'], 'initial_sl': sl})
+                    highs_since_entry = float(df_hist['high'].iloc[-1])
+                    lows_since_entry  = float(df_hist['low'].iloc[-1])
 
         # 5) maintenance and 6) exits
         if open_trade is not None:

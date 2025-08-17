@@ -39,8 +39,8 @@ strategy:
       lookback_for_recent_squeeze: 60
     breakout:
       primary: "donchian"
-      donchian_lookback: 25
-      buffer_atr_mult: 0.25
+      donchian_lookback: 30
+      buffer_atr_mult: 0.50
       ksigma:
         enabled: false
         k: 2.0
@@ -55,15 +55,15 @@ risk:
 
   stops:
     # Defaults; symbols can override in `symbols` section
-    initial_sl_atr_mult_default: 2.0
-    take_profit_atr_mult: 6.0
+    initial_sl_atr_mult_default: 20.0
+    take_profit_atr_mult: 100.0
 
     move_to_breakeven:
       trigger_r_multiple: 0.5
       be_offset_atr: 0.0
 
     trailing:
-      trail_atr_mult_default: 3.0
+      trail_atr_mult_default: 30.0
       step_atr: 0.5
 
   vol_targeting:
@@ -84,8 +84,8 @@ symbols:
       step_size: 0.0001
     min_notional_usd: 5.0
     stops:
-      initial_sl_atr_mult: 2.0    # optional symbol override
-      trailing_atr_mult: 3.0      # optional symbol override
+      initial_sl_atr_mult: 20.0    # optional symbol override
+      trailing_atr_mult: 100.0      # optional symbol override
   SOLUSDT:
     precision:
       min_qty: 0.1
