@@ -1,117 +1,36 @@
-logging:
-  level: INFO
-
+# configs/default.yaml
 universe:
-  symbols: ["BTCUSDT", "SOLUSDT", "ETHUSDT"]
-
-exchange:
-  ccxt_id: binance
-  taker_fee_bps: 7.5
-  sandbox: false
-
-# Equity used for backtest sizing (purely for simulation; match live if needed)
-account:
-  equity_usd: 10000.0
-
-strategy:
-  tsmom_regime:
-    signal_norm:
-      method: stdev
-      vol_window: 20
-      ewma_halflife_bars: 10
-    timeframes:
-      "1m":   { lookback_closes: 30 }
-      "5m":   { lookback_closes: 20 }
-      "15m":  { lookback_closes: 12 }
-      "1h":   { lookback_closes: 8 }
-    consensus:
-      weights: { "1m": 0.2, "5m": 0.3, "15m": 0.3, "1h": 0.2 }
-      long_threshold:  0.6
-      short_threshold: -0.6
-      neutral_buffer:  0.0
-
-  trigger:
-    gating:
-      require_recent_compression: true
-    compression:
-      bb_window: 20
-      min_squeeze_bars: 5
-      lookback_for_recent_squeeze: 60
-    breakout:
-      primary: "donchian"
-      donchian_lookback: 60
-      buffer_atr_mult: 0.50
-      ksigma:
-        enabled: false
-        k: 2.0
-        mean_window: 50
-        stdev_window: 50
+  symbols: [BTCUSDT]
+windows:
+  bar_minutes: 1
+  atr_window: 14
+  breakout_lookback: 25
+  compression_lookback: 80
+  compression_percentile: 70        # lower → more trades, higher → fewer trades
 
 risk:
-  atr:
-    window: 14
-    smoothing: ema
-    ema_halflife_bars: 10
+  atr_mult_sl: 25.0
+  atr_mult_tp: 100.0
+  fee_bps: 2.0                       # 2 bps per fill, applied on entry & exit
+  breakeven_threshold_r: 0.6         # move to BE only if unrealized R ≥ this
+  fee_buffer_r: 0.08                 # extra buffer (in R) for BE clamp (covers fees/slippage)
 
-  stops:
-    # Defaults; symbols can override in `symbols` section
-    initial_sl_atr_mult_default: 20.0
-    take_profit_atr_mult: 100.0
+tsl:
+  trail_activation_r: 0.5            # require this unrealized R before TSL turns on
+  atr_mult_tsl: 30.0                  # chandelier width from highest close (long)
+  trail_from: "highest_close"        # highest_close | highest_high
 
-    move_to_breakeven:
-      trigger_r_multiple: 0.5
-      be_offset_atr: 0.0
+signal:
+  breakout_offset_atr: 0.75          # breakout must exceed level by this ATR
+  need_confirm_closes: 1             # confirm closes beyond breakout line
+  min_body_ratio: 0.6                # body/true-range at confirmation
+  allow_second_leg: true             # breakout → pullback → resumption
+  cooldown_bars_after_regime_flip: 10
 
-    trailing:
-      trail_atr_mult_default: 30.0
-      step_atr: 0.5
+engine:
+  order_on_next_open: true
+  seed: 7
 
-  vol_targeting:
-    sizing:
-      per_trade_risk_cap_pct_equity: 1.0
-      max_leverage: 1.0
-    per_symbol_notional_cap_pct_equity: 100.0
-
-execution:
-  entry_order_type: market
-  prefer_maker: false
-
-# Exchange-like constraints used by ensure_min_qty_like_live during backtests
-symbols:
-  BTCUSDT:
-    precision:
-      min_qty: 0.001
-      step_size: 0.0001
-    min_notional_usd: 5.0
-    stops:
-      initial_sl_atr_mult: 20.0    # optional symbol override
-      trailing_atr_mult: 100.0      # optional symbol override
-  SOLUSDT:
-    precision:
-      min_qty: 0.1
-      step_size: 0.01
-    min_notional_usd: 5.0
-  ETHUSDT:
-    precision:
-      min_qty: 0.001
-      step_size: 0.0001
-    min_notional_usd: 5.0
-
-backtest:
-  # Default window: 2025-01-01 inclusive to 2025-08-01 exclusive ⇒ covers Jan–Jul 2025
-  start_date_utc: "2025-01-01"
-  end_date_utc:   "2025-08-01"
-
-  progress_bar: true
-  inputs:
-    type: tick_csv
-    path_pattern: "data/{symbol}/1m/{yyyymm}.csv"
-    tick_path_pattern: "inputs/{symbol}/{symbol}-ticks-{yyyy}-{mm}.csv"
-    tick_chunksize: 1000000  # rows per chunk for progress/low memory
-
-  output:
-    trades_csv: "outputs/{symbol}_trades_parity.csv"
-
-  simulator:
-    entry_fill: close        # "close" or "next_open"
-    slippage_bps: 0
+io:
+  trades_csv: "{results_dir}/{symbol}_trades.csv"
+  summary_csv: "{results_dir}/{symbol}_summary.csv"
