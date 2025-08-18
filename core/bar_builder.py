@@ -18,7 +18,7 @@ def read_ticks_to_bars(path: str, bar_minutes: int = 1) -> pd.DataFrame:
         dt = pd.to_datetime(ts, unit='ms', utc=True)
     else:
         dt = pd.to_datetime(ts, utc=True)
-    df["_dt"] = dt.dt.floor(f"{bar_minutes}T")
+    df["_dt"] = dt.dt.floor(f"{bar_minutes}min")
     # price column
     px_col = None
     for c in ["price","px","p"]:

@@ -13,11 +13,22 @@ It logs **true R** metrics when possible and includes:
 ## Run
 
 ```bash
-python -m backtests.backtest_tick   --data-dir tick_data   --results-dir results   --pairs BTCUSDT SOLUSDT   --months 2025-07   --config configs/default.yaml   --dump-config
+python -m backtests.backtest_tick   --data-dir inputs   --results-dir results   --pairs BTCUSDT SOLUSDT   --months 2025-07   --config configs/default.yaml   --dump-config
+```
+
+If your CSVs are under a nested symbol folder such as `inputs/BTCUSDT/`, you can either:
+
+- Point `--data-dir` at the parent `inputs` directory (the loader will find symbol folders), or
+- Point `--data-dir` directly at `inputs/BTCUSDT` (also works).
+
+Example:
+
+```bash
+python -m backtests.backtest_tick --data-dir inputs --results-dir results --pairs BTCUSDT --months 2025-01 --config configs/default.yaml
 ```
 
 ### Tick CSV format (per month)
-Assumes files like: `tick_data/BTCUSDT-ticks-YYYY-MM.csv` with columns:
+Assumes files like: `inputs/BTCUSDT-ticks-YYYY-MM.csv` (or `inputs/BTCUSDT/BTCUSDT-ticks-YYYY-MM.csv`) with columns:
 - `timestamp` (ms or ISO), `price`, `qty`  (extra columns are ignored)
 
 ### Notes
