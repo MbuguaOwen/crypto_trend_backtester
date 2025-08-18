@@ -219,38 +219,54 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
 def summarize(df: pd.DataFrame, sym: str, out_dir: str = "outputs"):
     import numpy as np, os
     os.makedirs(out_dir, exist_ok=True)
+
     total = len(df)
     counts = df.groupby("exit_type").size().reindex(["TP","TSL","SL","BE"], fill_value=0)
-    wins   = counts["TP"] + counts["TSL"]
-    losses = counts["SL"]
-    winrate = float(wins) / max(1, wins + losses)
 
+    # ---- Realized statistics ----
+    pos_mask = df["pnl"] > 0
+    neg_mask = df["pnl"] < 0
+    wins_real   = int(pos_mask.sum())
+    losses_real = int(neg_mask.sum())
+    winrate_real = wins_real / max(1, total)
     pnl_total = float(df["pnl"].sum()) if total else 0.0
-    avg_win = float(df.loc[df["pnl"] > 0, "pnl"].mean() or 0.0)
-    avg_loss = float(-df.loc[df["pnl"] < 0, "pnl"].mean() or 0.0)
-    expectancy = winrate * avg_win - (1.0 - winrate) * avg_loss
+    avg_win  = float(df.loc[pos_mask, "pnl"].mean() or 0.0)
+    avg_loss = float(-df.loc[neg_mask, "pnl"].mean() or 0.0)  # positive
+    expectancy = winrate_real * avg_win - (1.0 - winrate_real) * avg_loss
 
     summary = {
         "symbol": sym,
         "trades": int(total),
         "TP": int(counts["TP"]), "TSL": int(counts["TSL"]),
         "SL": int(counts["SL"]), "BE": int(counts["BE"]),
-        "wins": int(wins), "losses": int(losses),
-        "win_rate": round(winrate, 4),
+        "wins_real": wins_real, "losses_real": losses_real,
+        "win_rate_real": round(winrate_real, 4),
         "net_pnl": round(pnl_total, 2),
         "avg_win": round(avg_win, 2),
         "avg_loss": round(avg_loss, 2),
         "expectancy": round(expectancy, 4),
     }
 
-    # print to console
+    # Console log with realized win rate
     print(f"\n[{sym}] trades={summary['trades']} | TP={summary['TP']} TSL={summary['TSL']} "
-          f"SL={summary['SL']} BE={summary['BE']} | win_rate={summary['win_rate']:.3f} "
+          f"SL={summary['SL']} BE={summary['BE']} | win_rate_real={summary['win_rate_real']:.3f} "
           f"net_pnl={summary['net_pnl']:.2f} exp={summary['expectancy']:.4f}")
 
-    # save CSV
+    # Save summary CSV
     import pandas as pd
     pd.DataFrame([summary]).to_csv(os.path.join(out_dir, f"{sym}_summary.csv"), index=False)
+
+    # Save a per-exit breakdown for auditability
+    breakdown = (df.groupby('exit_type')
+                   .agg(trades=('pnl','size'),
+                        wins=('pnl', lambda s: int((s>0).sum())),
+                        losses=('pnl', lambda s: int((s<0).sum())),
+                        mean_pnl=('pnl','mean'),
+                        median_pnl=('pnl','median'),
+                        sum_pnl=('pnl','sum'))
+                   .reset_index())
+    breakdown.to_csv(os.path.join(out_dir, f"{sym}_exit_breakdown.csv"), index=False)
+
     return summary
 
 def main():
