@@ -141,9 +141,11 @@ def run_symbol(symbol: str, cfg: dict, data_dir: str, results_dir: str, months: 
                 trades.append(open_trade)
                 open_trade = None
 
-    # Export trades CSV with R-native fields
+    # --- Export trades CSV with R-native fields (zero-trades safe) ---
+    from pathlib import Path
     Path(results_dir).mkdir(parents=True, exist_ok=True)
     trades_csv = cfg["io"]["trades_csv"].format(results_dir=results_dir, symbol=symbol)
+
     rows = []
     for t in trades:
         r_at_exit = (t.exit_price - t.entry)/t.risk_r_denom if t.side=="LONG" else (t.entry - t.exit_price)/t.risk_r_denom
@@ -169,23 +171,43 @@ def run_symbol(symbol: str, cfg: dict, data_dir: str, results_dir: str, months: 
             "trail_at_exit": t.trail_price,
             "trail_activation_r": t.activation_r,
         })
-    df_tr = pd.DataFrame(rows)
+
+    # Define columns explicitly so even an empty DataFrame has the headers
+    _cols = [
+        "ts_open","ts_close","symbol","side","entry","exit","qty","pnl","exit_type","entry_reason",
+        "initial_sl","tp","risk_r_denom","mfe_price","mfe_r","r_at_exit",
+        "trail_active","trail_at_exit","trail_activation_r"
+    ]
+    df_tr = pd.DataFrame(rows, columns=_cols)
     df_tr.to_csv(trades_csv, index=False)
 
-    # summary
-    counts = df_tr["exit_type"].value_counts().to_dict()
-    net = float(df_tr["pnl"].sum()) if len(df_tr) else 0.0
+    # --- Summary (zero-trades safe) ---
+    counts = df_tr["exit_type"].value_counts().to_dict() if not df_tr.empty else {}
+    net = float(df_tr["pnl"].sum()) if not df_tr.empty else 0.0
+
     summary_csv = cfg["io"]["summary_csv"].format(results_dir=results_dir, symbol=symbol)
     sm = {
         "symbol": symbol,
-        "trades": len(df_tr),
-        "TP": int(counts.get("TP",0)),
-        "TSL": int(counts.get("TSL",0)),
-        "SL": int(counts.get("SL",0)),
-        "BE": int(counts.get("BE",0)),
+        "trades": int(len(df_tr)),
+        "TP": int(counts.get("TP", 0)),
+        "TSL": int(counts.get("TSL", 0)),
+        "SL": int(counts.get("SL", 0)),
+        "BE": int(counts.get("BE", 0)),
         "net_pnl": net
     }
     pd.DataFrame([sm]).to_csv(summary_csv, index=False)
+
+    # Optional: write an advisory file if no trades
+    if df_tr.empty:
+        with open(Path(results_dir) / f"{symbol}_ZERO_TRADES_ADVISORY.txt", "w") as f:
+            f.write(
+                "No trades were generated for this run.\n"
+                "Tips:\n"
+                "- Loosen breakout confirmation (confirm closes, body ratio).\n"
+                "- Lower compression percentile or shorten lookbacks.\n"
+                "- Ensure data months cover warm-up for indicators.\n"
+                "- Verify entry precedence and regime gates.\n"
+            )
     return sm
 
 def main():
