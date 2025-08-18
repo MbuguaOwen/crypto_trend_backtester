@@ -6,10 +6,10 @@ Tick→bar backtest with profit-protective TSL (invariants A/B/C), walk-forward 
 - Logs R-native metrics for proper analysis.
 """
 import os, argparse, json
+from tqdm import tqdm  # add this import near the top with other imports
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
 
 from core.config import load_config
 from core.bar_builder import read_ticks_to_bars
@@ -22,16 +22,45 @@ def _months_list(s: str):
     # "2025-01,2025-02" or "2025-07"
     return [x.strip() for x in s.replace(";", ",").split(",") if x.strip()]
 
+
+def _find_month_file(base_dir: Path, symbol: str, month: str):
+    """
+    Return a Path to {symbol}-ticks-{month}.csv by checking:
+      - base_dir/{symbol}-ticks-{month}.csv
+      - base_dir/{symbol}/{symbol}-ticks-{month}.csv
+      - recursive search under base_dir via rglob
+    """
+    fname = f"{symbol}-ticks-{month}.csv"
+    # direct candidates
+    candidates = [
+        base_dir / fname,
+        base_dir / symbol / fname,
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+
+    # recursive fallback
+    hits = list(base_dir.rglob(fname))
+    return hits[0] if hits else None
+
+
 def _load_bars_for_symbol(data_dir: str, symbol: str, months: list, bar_minutes: int) -> pd.DataFrame:
+    base = Path(data_dir)
     dfs = []
-    for m in months:
-        fp = Path(data_dir) / f"{symbol}-ticks-{m}.csv"
-        if not fp.exists():
-            print(f"[WARN] Missing {fp}")
+    for m in tqdm(months, desc=f"[{symbol}] loading months", unit="mo"):
+        fp = _find_month_file(base, symbol, m)
+        if fp is None:
+            print(f"[WARN] Missing {symbol}-ticks-{m}.csv in {base} (also checked {base/symbol}; rglob fallback too).")
             continue
-        dfs.append(read_ticks_to_bars(str(fp), bar_minutes=bar_minutes))
+        # build bars for this month
+        monthly = read_ticks_to_bars(str(fp), bar_minutes=bar_minutes)
+        monthly["symbol"] = symbol
+        dfs.append(monthly)
+
     if not dfs:
-        raise FileNotFoundError("No monthly tick files found.")
+        raise FileNotFoundError(f"No monthly tick files found for {symbol}. Looked under {base} and {base/symbol} and via rglob.")
+
     bars = pd.concat(dfs, ignore_index=True).sort_values("ts").reset_index(drop=True)
     return bars
 
@@ -71,7 +100,7 @@ def run_symbol(symbol: str, cfg: dict, data_dir: str, results_dir: str, months: 
     qty = 1.0
 
     # iterate bars; when signal at t, enter at t+1 open
-    for i in tqdm(range(len(df)-1), desc=f"[{symbol}] running"):
+    for i in tqdm(range(len(df) - 1), desc=f"[{symbol}] bars", unit="bar"):
         row = df.iloc[i]
         nxt = df.iloc[i+1]
 
