@@ -34,13 +34,13 @@ strategy:
     gating:
       require_recent_compression: true
     compression:
-      bb_window: 20
+      bb_window: 40
       min_squeeze_bars: 5
       lookback_for_recent_squeeze: 60
     breakout:
       primary: "donchian"
       donchian_lookback: 60
-      buffer_atr_mult: 0.50
+      buffer_atr_mult: 1.5
       ksigma:
         enabled: false
         k: 2.0
@@ -55,19 +55,19 @@ risk:
 
   stops:
     # Defaults; symbols can override in `symbols` section
-    initial_sl_atr_mult_default: 20.0
-    take_profit_atr_mult: 100.0
+    initial_sl_atr_mult_default: 2.0
+    take_profit_atr_mult: 10.0
 
     move_to_breakeven:
-      trigger_r_multiple: 1.0
+      trigger_r_multiple: 0.5  # Move to breakeven after 1.0 R profit
       be_offset_atr: 0.5   # ≥0.5 ATR recommended
 
     trailing:
       trail_atr_mult_default: 3.0
-      step_atr: 0.5
+      step_atr: 0.75
       activate_after_be: true
-      activate_after_r_multiple: 1.0
-      min_gap_atr: 0.5
+      activate_after_r_multiple: 0.5 # Activate trailing after 1.0 R profit
+      min_gap_atr: 5.0
 
   vol_targeting:
     sizing:
@@ -87,8 +87,8 @@ symbols:
       step_size: 0.0001
     min_notional_usd: 5.0
     stops:
-      initial_sl_atr_mult: 20.0    # optional symbol override
-      trailing_atr_mult: 100.0      # optional symbol override
+      initial_sl_atr_mult: 2.0    # optional symbol override
+      trailing_atr_mult: 10.0      # optional symbol override
   SOLUSDT:
     precision:
       min_qty: 0.1
