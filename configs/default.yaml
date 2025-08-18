@@ -118,3 +118,4 @@ backtest:
   simulator:
     entry_fill: close        # "close" or "next_open"
     slippage_bps: 0
+    atr_use_prior_bar_only: true   # new: strict timing for ATR during maintenance

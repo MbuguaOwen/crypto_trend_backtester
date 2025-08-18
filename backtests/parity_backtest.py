@@ -118,8 +118,10 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
     constraints = _symbol_constraints_from_cfg(cfg, symbol)
 
     open_trade: Optional[Trade] = None
-    highs_since_entry = None
-    lows_since_entry  = None
+    highs_since_entry: Optional[float] = None
+    lows_since_entry: Optional[float]  = None
+    # Bar index where entry was created; maintenance/exit runs strictly AFTER this bar.
+    entry_bar_idx: Optional[int] = None
 
     rows: List[TradeRow] = []
 
@@ -162,21 +164,36 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
                 if qty > 0:
                     open_trade = Trade(symbol=symbol, side=side, entry_price=entry_px, qty=qty, sl=sl, tp=tp, ts_open=ts_open_ms,
                                        meta={'entry_reason': sig['reason'], 'initial_sl': sl})
-                    highs_since_entry = float(df_hist['high'].iloc[-1])
-                    lows_since_entry  = float(df_hist['low'].iloc[-1])
+                    # Remember which bar created this trade; we will defer maintenance to the *next* bar.
+                    entry_bar_idx = i
+                    # Seed post-entry extremes conservatively at the actual entry price,
+                    # NOT the signal bar's H/L (avoids intra-bar lookahead).
+                    highs_since_entry = float(entry_px)
+                    lows_since_entry  = float(entry_px)
 
-        # 5) maintenance and 6) exits
-        if open_trade is not None:
+        # 5) maintenance and 6) exits — strictly AFTER the entry bar to avoid intra-bar lookahead
+        if open_trade is not None and (entry_bar_idx is not None) and (i > entry_bar_idx):
             highs_since_entry = max(highs_since_entry, float(df1m['high'].iloc[i]))
             lows_since_entry  = min(lows_since_entry,  float(df1m['low'].iloc[i]))
-            atr_val = risk.compute_atr(df_hist[['high','low','close']], cfg['risk']['atr']['window'],
+
+            # Optional strict ATR timing: prior bars only, controlled by config.
+            if cfg['backtest']['simulator'].get('atr_use_prior_bar_only', False):
+                atr_hist = df_hist.iloc[:-1]
+            else:
+                atr_hist = df_hist
+
+            atr_val = risk.compute_atr(atr_hist[['high','low','close']], cfg['risk']['atr']['window'],
                                        smoothing=cfg['risk']['atr']['smoothing'],
                                        ema_halflife_bars=cfg['risk']['atr']['ema_halflife_bars'])
+
             open_trade.update_levels(float(df1m['close'].iloc[i]), atr_val, highs_since_entry, lows_since_entry, cfg)
 
             exit_type = open_trade.check_exit(float(df1m['high'].iloc[i]), float(df1m['low'].iloc[i]))
             if exit_type:
-                # exit price convention
+                # Safety: an exit can never occur on the same bar as entry.
+                assert i > entry_bar_idx, f"Leak: exit on entry bar (i={i}, entry_bar_idx={entry_bar_idx})"
+
+                # exit price convention (unchanged)
                 if exit_type == EXIT_TP:
                     exit_px = open_trade.tp
                 elif exit_type == EXIT_TSL and open_trade.tsl_active and open_trade.tsl_level is not None:
@@ -187,7 +204,6 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
                     exit_px = float(df1m['close'].iloc[i])
                 ts_close = int(df1m.index[i].timestamp() * 1000)
 
-                # pnl (include taker fees on entry+exit)
                 fee_frac = utils.bps_to_frac(cfg['exchange']['taker_fee_bps'])
                 if open_trade.side == 'LONG':
                     pnl_gross = (exit_px - open_trade.entry_price) * open_trade.qty
@@ -203,6 +219,7 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
                     exit_type=exit_type, entry_reason=open_trade.meta.get('entry_reason','')
                 ))
                 open_trade = None
+                entry_bar_idx = None
                 highs_since_entry = None
                 lows_since_entry  = None
 
