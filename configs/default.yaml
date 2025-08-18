@@ -39,7 +39,7 @@ strategy:
       lookback_for_recent_squeeze: 60
     breakout:
       primary: "donchian"
-      donchian_lookback: 30
+      donchian_lookback: 60
       buffer_atr_mult: 0.50
       ksigma:
         enabled: false
