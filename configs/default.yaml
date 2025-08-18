@@ -59,12 +59,15 @@ risk:
     take_profit_atr_mult: 100.0
 
     move_to_breakeven:
-      trigger_r_multiple: 0.5
-      be_offset_atr: 0.0
+      trigger_r_multiple: 1.0
+      be_offset_atr: 0.5   # ≥0.5 ATR recommended
 
     trailing:
-      trail_atr_mult_default: 30.0
+      trail_atr_mult_default: 3.0
       step_atr: 0.5
+      activate_after_be: true
+      activate_after_r_multiple: 1.0
+      min_gap_atr: 0.5
 
   vol_targeting:
     sizing:
