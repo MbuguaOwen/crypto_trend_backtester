@@ -30,31 +30,25 @@ from backtests.data_ingest import load_1m_df_for_range
 
 def warmup_bars_required(cfg: dict) -> int:
     st = cfg['strategy']
-    # regime lookbacks (in closes count; in their own tf)
+    # regime lookbacks (unchanged)
     regime_look = max(v['lookback_closes'] for _, v in st['tsmom_regime']['timeframes'].items())
-    comp = st['trigger']['compression']
-    don  = st['trigger']['breakout']
-    kcfg = st['trigger']['breakout'].get('ksigma', {})
-    risk = cfg['risk']['atr']
 
-    # entry windows (new)
-    ent = cfg.get('entry', {}) or {}
-    th  = ent.get('thrust', {}) if ent else {}
-    rt  = ent.get('retest', {}) if ent else {}
-    z_win = int(th.get('zscore_window', 20))
-    look  = int(rt.get('confirm_lookback', 10))
+    # NEW: BOCPD + minimal breakout/ATR windows
+    ent = cfg.get('entry', {}).get('bocpd', {}) or {}
+    sqz = ent.get('squeeze', {}) or {}
+    rv_lb = int(sqz.get('rv_lookback', 30))
+    pctw  = int(sqz.get('pct_window', 300))
+    don   = int(cfg.get('trigger', {}).get('breakout', {}).get('donchian_lookback', 25))
+    atrw  = int(cfg['risk']['atr']['window'])
+    halfl = int(cfg['risk']['atr'].get('ema_halflife_bars', 10))
 
+    # Require enough bars for percentile + donchian prior + ATR smoothing
     warm = max(
         regime_look + 2,
-        comp['bb_window'],
-        comp['min_squeeze_bars'],
-        comp['lookback_for_recent_squeeze'],
-        don['donchian_lookback'] + 2,               # prior-bar channel + current
-        kcfg.get('mean_window', 0),
-        kcfg.get('stdev_window', 0),
-        risk['window'] + 1 + risk['ema_halflife_bars'],
-        z_win + 2,
-        look + 2
+        rv_lb + 2,
+        pctw + 2,
+        don + 2,
+        atrw + 1 + halfl,
     )
     return int(warm)
 

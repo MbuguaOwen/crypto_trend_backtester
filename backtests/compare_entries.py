@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Run baseline vs thrust_breakout vs retest_ignition and compare.
-Writes per-mode trades/summary/breakdown into outputs/{mode}/.
+Compare entry modes (BOCPD-only build).
+Currently supports only "bocpd_squeeze_breakout"; legacy modes are skipped.
 """
 import os, copy, argparse, pandas as pd
 from .parity_backtest import _load_yaml, run_symbol, summarize
@@ -24,11 +24,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--symbol", required=True)
-    ap.add_argument("--modes", nargs="+", default=["baseline","thrust_breakout","retest_ignition"])
+    ap.add_argument("--modes", nargs="+", default=["bocpd_squeeze_breakout"])
     args = ap.parse_args()
 
     rows=[]
     for m in args.modes:
+        if m != "bocpd_squeeze_breakout":
+            print(f"Skipping legacy mode '{m}' (BOCPD-only build).")
+            continue
         print(f"\n=== Running mode: {m} ===")
         _, summ = run_mode(args.config, args.symbol, m)
         rows.append(summ)
