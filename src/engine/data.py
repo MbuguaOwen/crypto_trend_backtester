@@ -3,6 +3,7 @@ import os
 import pandas as pd
 from .utils import ensure_datetime_utc
 import numpy as np
+from tqdm import tqdm
 
 def _infer_timestamp_col(cols):
     for c in cols:
@@ -39,7 +40,8 @@ def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
         dt = pd.to_datetime(ts, unit=unit, utc=True)
     else:
         dt = pd.to_datetime(ts, utc=True)
-    idx = pd.DatetimeIndex(dt).floor('T')
+    # use 'min' (not 'T') to avoid FutureWarning
+    idx = pd.DatetimeIndex(dt).floor('min')
     df.index = idx
     price = df[p_col].astype('float64')
     vol = df[q_col].astype('float64') if q_col is not None else 1.0
@@ -55,14 +57,25 @@ def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
 
 def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
     frames = []
-    for m in months:
+    iterator = months
+    bar = None
+    if progress:
+        bar = tqdm(months, desc=f"{symbol} months", ncols=100, leave=False)
+        iterator = bar
+    for m in iterator:
         fn = f"{symbol}/{symbol}-ticks-{m}.csv"
         path = os.path.join(inputs_dir, fn)
         if not os.path.exists(path):
+            if not progress:
+                print(f"[{symbol}] MISSING {m} → {os.path.basename(fn)}")
             continue
-        if progress:
+        if progress and bar is not None:
+            bar.set_postfix_str(m)
+        else:
             print(f"[{symbol}] Loading {m} → {os.path.basename(path)}")
         frames.append(read_ticks_to_1m(path))
+    if bar is not None:
+        bar.close()
     if not frames:
         raise FileNotFoundError(f"No monthly files found for {symbol}. Looked for months={months}.")
     df = pd.concat(frames).sort_index()

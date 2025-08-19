@@ -130,7 +130,7 @@ class WaveGate:
         if len(df1m) < 200:
             return {'armed': False}
 
-        df5 = resample_ohlcv(df1m, '5T')
+        df5 = resample_ohlcv(df1m, '5min')
         if len(df5) < 60:
             return {'armed': False}
 
