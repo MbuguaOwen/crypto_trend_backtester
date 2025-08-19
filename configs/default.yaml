@@ -49,7 +49,7 @@ entry:
 
     # Squeeze gate (low realized vol, replaces old 'compression' gate)
     squeeze:
-      rv_lookback: 30         # bars for realized-vol (std of log returns)
+      rv_lookback: 30         # bars for realized-vol (std of log returns) 30min
       pct_window: 300         # window for percentile calc
       max_pct: 0.35           # require vol percentile ≤ this
 
