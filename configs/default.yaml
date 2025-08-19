@@ -47,6 +47,24 @@ strategy:
         mean_window: 50
         stdev_window: 50
 
+entry:
+  mode: "baseline"            # "baseline" | "thrust_breakout" | "retest_ignition"
+
+  thrust:
+    zscore_window: 20
+    zscore_k: 1.5
+    min_body_dom: 0.6         # (close-open)/(high-low), use sign for direction
+    buffer_atr_mult: 0.25     # entry buffer beyond trigger level
+
+  retest:
+    retrace_min_atr: 0.3      # shallow retrace band
+    retrace_max_atr: 0.6
+    time_limit_bars: 30       # must re-ignite quickly
+    confirm_z_k: 0.8
+    min_body_dom: 0.5
+    confirm_lookback: 10      # micro high/low lookback for re-break
+    buffer_atr_mult: 0.25
+
 risk:
   atr:
     window: 14
