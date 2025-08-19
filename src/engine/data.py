@@ -1,8 +1,8 @@
 
 import os
 import pandas as pd
-import numpy as np
 from .utils import ensure_datetime_utc
+import numpy as np
 
 def _infer_timestamp_col(cols):
     for c in cols:
@@ -32,17 +32,15 @@ def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
     p_col  = _infer_price_col(df.columns)
     q_col  = _infer_qty_col(df.columns)
     ts = df[ts_col]
-    # handle ms/seconds/iso
+    # handle ms/seconds/iso → ALWAYS wrap into DatetimeIndex then floor
     if pd.api.types.is_integer_dtype(ts) or pd.api.types.is_float_dtype(ts):
         ts = ts.astype('int64')
-        # guess ms vs s
-        if ts.median() > 1e12:
-            idx = pd.to_datetime(ts, unit='ms', utc=True)
-        else:
-            idx = pd.to_datetime(ts, unit='s', utc=True)
+        unit = 'ms' if float(ts.median()) > 1e12 else 's'
+        dt = pd.to_datetime(ts, unit=unit, utc=True)
     else:
-        idx = pd.to_datetime(ts, utc=True)
-    df.index = idx.floor('T')
+        dt = pd.to_datetime(ts, utc=True)
+    idx = pd.DatetimeIndex(dt).floor('T')
+    df.index = idx
     price = df[p_col].astype('float64')
     vol = df[q_col].astype('float64') if q_col is not None else 1.0
     out = pd.DataFrame({

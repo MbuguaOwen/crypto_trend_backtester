@@ -12,7 +12,7 @@ from .risk import RiskCfg, initial_stop, update_stops, check_exit
 
 from .utils import atr
 
-def run_for_symbol(cfg: dict, symbol: str):
+def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     inputs_dir = cfg['paths']['inputs_dir']
     outputs_dir = cfg['paths']['outputs_dir']
     months = cfg['months']
@@ -39,12 +39,19 @@ def run_for_symbol(cfg: dict, symbol: str):
     # Precompute ATR for speed
     atr_series = atr(df1m, risk_cfg.atr_window)
 
+    total_bars = max(0, len(df1m) - warmup)
     iterator = range(warmup, len(df1m))
     if cfg['logging']['progress']:
         iterator = tqdm(iterator, desc=f"Backtest {symbol}", ncols=100)
 
     blockers = {'regime_flat':0, 'wave_not_armed':0, 'trigger_fail':0}
     for i in iterator:
+        # external progress hook (bars processed)
+        if progress_hook is not None:
+            try:
+                progress_hook(symbol, i - warmup, total_bars)
+            except Exception:
+                pass
         window = df1m.iloc[:i+1]
         row = df1m.iloc[i]
 
@@ -135,13 +142,13 @@ def run_for_symbol(cfg: dict, symbol: str):
 
     return summary
 
-def run_all(config_path: str):
+def run_all(config_path: str, progress_hook=None):
     with open(config_path,'r') as f:
         cfg = yaml.safe_load(f)
     summaries = []
     for sym in cfg['symbols']:
         try:
-            s = run_for_symbol(cfg, sym)
+            s = run_for_symbol(cfg, sym, progress_hook=progress_hook)
         except Exception as e:
             s = {'symbol': sym, 'error': str(e)}
         summaries.append(s)
