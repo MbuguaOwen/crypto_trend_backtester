@@ -1,5 +1,4 @@
 
-import math
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional
@@ -35,8 +34,9 @@ class WaveGate:
         for i in range(1, len(df5)):
             row = df5.iloc[i]
             idx = df5.index[i]
-            a = atr_series.iloc[i]
-            if math.isnan(a) or a == 0:
+            # iat: pure positional, avoids pandas list-like indexer issues
+            a = float(atr_series.iat[i])
+            if not np.isfinite(a) or a <= 0:
                 continue
             if last_type in (None, 'L'):  # looking for H
                 if row['high'] >= last_price + mult * a:
