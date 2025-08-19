@@ -21,7 +21,7 @@ class TSMOMRegime:
             elif tf == "15m":
                 closes = resample_ohlcv(df1m, '15min')['close']
             elif tf == "1h":
-                closes = resample_ohlcv(df1m, '1H')['close']
+                closes = resample_ohlcv(df1m, '1h')['close']
             else:
                 continue
             if len(closes) <= lb:

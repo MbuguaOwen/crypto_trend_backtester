@@ -2,6 +2,18 @@
 import numpy as np
 import pandas as pd
 
+def _normalize_rule(rule: str) -> str:
+    """
+    Normalize pandas offset aliases to avoid FutureWarnings:
+      - 'T'  → 'min'   (e.g., '5T' → '5min')
+      - 'H'  → 'h'     (e.g., '1H' → '1h')
+    """
+    r = str(rule)
+    # order matters: replace 'T' before 'H' to avoid odd combos
+    r = r.replace('T', 'min')
+    r = r.replace('H', 'h')
+    return r
+
 def ensure_datetime_utc(s):
     s = pd.to_datetime(s, utc=True)
     return s
@@ -29,6 +41,7 @@ def zscore_logret(close: pd.Series, win: int = 20) -> pd.Series:
     return z.fillna(0.0)
 
 def resample_ohlcv(df1m: pd.DataFrame, rule: str) -> pd.DataFrame:
+    rule = _normalize_rule(rule)
     agg = {
         'open': 'first',
         'high': 'max',
