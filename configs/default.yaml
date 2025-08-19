@@ -30,40 +30,33 @@ strategy:
       short_threshold: -0.6
       neutral_buffer:  0.0
 
-  trigger:
-    gating:
-      require_recent_compression: true
-    compression:
-      bb_window: 40
-      min_squeeze_bars: 5
-      lookback_for_recent_squeeze: 60
-    breakout:
-      primary: "donchian"
-      donchian_lookback: 30
-      buffer_atr_mult: 1.5
-      ksigma:
-        enabled: false
-        k: 2.0
-        mean_window: 50
-        stdev_window: 50
-
 entry:
-  mode: "baseline"            # "baseline" | "thrust_breakout" | "retest_ignition"
+  mode: "bocpd_squeeze_breakout"   # BOCPD is the only trigger
 
-  thrust:
-    zscore_window: 20
-    zscore_k: 1.5
-    min_body_dom: 0.6         # (close-open)/(high-low), use sign for direction
-    buffer_atr_mult: 0.25     # entry buffer beyond trigger level
+  bocpd:
+    # BOCPD core
+    hazard_lambda: 200        # constant-hazard λ (expected run length)
+    rmax: 600                 # max run-length tracked
+    prior:
+      mu0: 0.0
+      kappa0: 1e-3
+      alpha0: 1.0
+      beta0: 1.0
 
-  retest:
-    retrace_min_atr: 0.3      # shallow retrace band
-    retrace_max_atr: 0.6
-    time_limit_bars: 30       # must re-ignite quickly
-    confirm_z_k: 0.8
-    min_body_dom: 0.5
-    confirm_lookback: 10      # micro high/low lookback for re-break
-    buffer_atr_mult: 0.25
+    min_cp_prob: 0.80         # P(run_length=0) threshold to arm
+    cooldown_bars: 30         # avoid clustered fires
+    freshness_bars: 120       # avoid stale breakouts
+
+    # Squeeze gate (low realized vol, replaces old 'compression' gate)
+    squeeze:
+      rv_lookback: 30         # bars for realized-vol (std of log returns)
+      pct_window: 300         # window for percentile calc
+      max_pct: 0.35           # require vol percentile ≤ this
+
+trigger:
+  breakout:
+    donchian_lookback: 25     # prior-bar channel length
+    buffer_atr_mult: 0.25     # ATR buffer added to Donchian level
 
 risk:
   atr:
