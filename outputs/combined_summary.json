@@ -1,0 +1,14 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "error": "'Series' object has no attribute 'floor'"
+  },
+  {
+    "symbol": "ETHUSDT",
+    "error": "'Series' object has no attribute 'floor'"
+  },
+  {
+    "symbol": "SOLUSDT",
+    "error": "'Series' object has no attribute 'floor'"
+  }
+]

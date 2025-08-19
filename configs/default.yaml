@@ -1,132 +1,71 @@
-logging:
-  level: INFO
+paths:
+  inputs_dir: "inputs"
+  outputs_dir: "outputs"
 
-universe:
-  symbols: ["BTCUSDT", "SOLUSDT", "ETHUSDT"]
+symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
-exchange:
-  ccxt_id: binance
-  taker_fee_bps: 7.5
-  sandbox: false
+months: ["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07"]
 
-# Equity used for backtest sizing (purely for simulation; match live if needed)
-account:
-  equity_usd: 10000.0
+warmup:
+  min_1m_bars: 1000  # ensure indicators populated
 
-strategy:
-  tsmom_regime:
-    signal_norm:
-      method: stdev
-      vol_window: 20
-      ewma_halflife_bars: 10
-    timeframes:
-      "1m":   { lookback_closes: 30 }
-      "5m":   { lookback_closes: 20 }
-      "15m":  { lookback_closes: 12 }
-      "1h":   { lookback_closes: 8 }
-    consensus:
-      weights: { "1m": 0.2, "5m": 0.3, "15m": 0.3, "1h": 0.2 }
-      long_threshold:  0.6
-      short_threshold: -0.6
-      neutral_buffer:  0.0
+regime:
+  timeframes:
+    "1m":  { lookback_closes: 30 }
+    "5m":  { lookback_closes: 20 }
+    "15m": { lookback_closes: 12 }
+    "1h":  { lookback_closes: 8 }
+  vote:
+    require: 3
+
+waves:
+  enabled: true
+  zigzag:
+    atr_window: 50
+    atr_mults: [1.0, 2.0, 3.5]
+    max_lookback_bars: 2500
+  thresholds:
+    min_confidence: 0.55
+    w2_posterior_min: 0.55
+    w2_end_arm: 0.62
+    block_if_correction_p: 0.60
+    max_age_impulse_bars: 20
+
+entry_gate:
+  mode: "W2_to_W3_only"
+  confirmations:
+    micro_msb: true
+    min_body_dom: 0.55
+    donchian_breakout: { enabled: true, lookback: 20 }
+  buffers:
+    breakout_atr_mult: 0.20
 
 entry:
-  mode: "bocpd_squeeze_breakout"   # BOCPD is the only trigger
-
-  bocpd:
-    # BOCPD core
-    hazard_lambda: 200        # constant-hazard λ (expected run length)
-    rmax: 600                 # max run-length tracked
-    prior:
-      mu0: 0.0
-      kappa0: 1e-3
-      alpha0: 1.0
-      beta0: 1.0
-
-    min_cp_prob: 0.80         # P(run_length=0) threshold to arm
-    cooldown_bars: 30         # avoid clustered fires
-    freshness_bars: 120       # avoid stale breakouts
-
-    # Squeeze gate (low realized vol, replaces old 'compression' gate)
-    squeeze:
-      rv_lookback: 30         # bars for realized-vol (std of log returns) 30min
-      pct_window: 300         # window for percentile calc
-      max_pct: 0.35           # require vol percentile ≤ this
-
-trigger:
+  mode: "wavegate_momentum"
+  momentum:
+    zscore_window: 20
+    zscore_k: 1.7
+    min_body_dom: 0.55
+    range_atr_min: 1.2
   breakout:
-    donchian_lookback: 25     # prior-bar channel length
-    buffer_atr_mult: 0.25     # ATR buffer added to Donchian level
+    buffer_atr_mult: 0.40
 
 risk:
   atr:
     window: 14
-    smoothing: ema
-    ema_halflife_bars: 10
+  sl:
+    mode: "structure_or_atr"
+    atr_mult: 15.0
+  be:
+    trigger_r_multiple: 0.5
+  tsl:
+    start_r_multiple: 15.0
+    atr_mult: 1.0
 
-  stops:
-    # Defaults; symbols can override in `symbols` section
-    initial_sl_atr_mult_default: 20.0
-    take_profit_atr_mult: 100.0
+position:
+  qty_mode: "notional"  # "units" or "notional"
+  notional_usd: 100      # used for P&L scaling; no brokerage here
 
-    move_to_breakeven:
-      trigger_r_multiple: 0.5  # Move to breakeven after 1.0 R profit
-      be_offset_atr: 0.5   # ≥0.5 ATR recommended
-
-    trailing:
-      trail_atr_mult_default: 30.0
-      step_atr: 0.75
-      activate_after_be: true
-      activate_after_r_multiple: 0.8 # Activate trailing after 1.0 R profit
-      min_gap_atr: 5.0
-
-  vol_targeting:
-    sizing:
-      per_trade_risk_cap_pct_equity: 1.0
-      max_leverage: 1.0
-    per_symbol_notional_cap_pct_equity: 100.0
-
-execution:
-  entry_order_type: market
-  prefer_maker: false
-
-# Exchange-like constraints used by ensure_min_qty_like_live during backtests
-symbols:
-  BTCUSDT:
-    precision:
-      min_qty: 0.001
-      step_size: 0.0001
-    min_notional_usd: 5.0
-    stops:
-      initial_sl_atr_mult: 20.0    # optional symbol override
-      trailing_atr_mult: 100.0      # optional symbol override
-  SOLUSDT:
-    precision:
-      min_qty: 0.1
-      step_size: 0.01
-    min_notional_usd: 5.0
-  ETHUSDT:
-    precision:
-      min_qty: 0.001
-      step_size: 0.0001
-    min_notional_usd: 5.0
-
-backtest:
-  # Default window: 2025-01-01 inclusive to 2025-08-01 exclusive ⇒ covers Jan–Jul 2025
-  start_date_utc: "2025-01-01"
-  end_date_utc:   "2025-08-01"
-
-  progress_bar: true
-  inputs:
-    type: tick_csv
-    path_pattern: "data/{symbol}/1m/{yyyymm}.csv"
-    tick_path_pattern: "inputs/{symbol}/{symbol}-ticks-{yyyy}-{mm}.csv"
-    tick_chunksize: 1000000  # rows per chunk for progress/low memory
-
-  output:
-    trades_csv: "outputs/{symbol}_trades_parity.csv"
-
-  simulator:
-    entry_fill: close        # "close" or "next_open"
-    slippage_bps: 0
-    atr_use_prior_bar_only: true   # new: strict timing for ATR during maintenance
+logging:
+  progress: true
+  debug_blockers: true
