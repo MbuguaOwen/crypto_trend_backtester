@@ -1,4 +1,5 @@
 
+import math
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional
@@ -34,7 +35,6 @@ class WaveGate:
         for i in range(1, len(df5)):
             row = df5.iloc[i]
             idx = df5.index[i]
-            # iat: pure positional, avoids pandas list-like indexer issues
             a = float(atr_series.iat[i])
             if not np.isfinite(a) or a <= 0:
                 continue
@@ -126,18 +126,21 @@ class WaveGate:
         conf = (depth_score + comp_score + time_score)/3.0
         return float(score), float(posterior), float(conf), depth
 
-    def compute(self, df1m: pd.DataFrame):
-        if len(df1m) < 200:
+    def compute_at(self, df5_all: pd.DataFrame, atr5_all: pd.Series, ts):
+        # pad to last 5m bar at/<= ts
+        if ts < df5_all.index[0]:
             return {'armed': False}
-
-        df5 = resample_ohlcv(df1m, '5min')
+        try:
+            j = df5_all.index.get_loc(ts, method='pad')
+        except KeyError:
+            return {'armed': False}
+        start = max(0, j - self.max_lookback_bars)
+        df5 = df5_all.iloc[start:j+1]
+        atr5 = atr5_all.iloc[start:j+1]
         if len(df5) < 60:
             return {'armed': False}
 
-        # ATR on 5m
-        a = atr(df5, self.atr_window)
-
-        pivots = self._zigzag_atr(df5, a, self.atr_mults[0])
+        pivots = self._zigzag_atr(df5, atr5, self.atr_mults[0])
         w = self._w1_w2_from_pivots(pivots)
         if not w:
             return {'armed': False}
@@ -155,7 +158,7 @@ class WaveGate:
             W2_high = w['w2_end'][1]
 
         # Age check
-        age_bars = len(df5) - df5.index.get_loc(w['w1_end'][0])
+        age_bars = (len(df5) - 1) - df5.index.get_loc(w['w1_end'][0])
         if age_bars > self.max_age_impulse_bars:
             armed = False
 

@@ -69,3 +69,6 @@ position:
 logging:
   progress: true
   debug_blockers: true
+  # throttle UI updates to keep bars smooth & fast
+  progress_stride: 50     # update hook every N bars
+  overall_bar: true       # show combined progress bar across symbols

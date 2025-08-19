@@ -5,11 +5,10 @@ import pandas as pd
 def _normalize_rule(rule: str) -> str:
     """
     Normalize pandas offset aliases to avoid FutureWarnings:
-      - 'T'  → 'min'   (e.g., '5T' → '5min')
-      - 'H'  → 'h'     (e.g., '1H' → '1h')
+      'T' → 'min', 'H' → 'h'
+      Works for composites like '5T' → '5min'
     """
     r = str(rule)
-    # order matters: replace 'T' before 'H' to avoid odd combos
     r = r.replace('T', 'min')
     r = r.replace('H', 'h')
     return r

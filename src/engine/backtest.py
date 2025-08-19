@@ -10,7 +10,7 @@ from .waves import WaveGate
 from .trigger import momentum_ignition
 from .risk import RiskCfg, initial_stop, update_stops, check_exit
 
-from .utils import atr
+from .utils import atr, resample_ohlcv
 
 def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     inputs_dir = cfg['paths']['inputs_dir']
@@ -22,7 +22,10 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     df1m = load_symbol_1m(inputs_dir, symbol, months, progress=cfg['logging']['progress'])
     if len(df1m) < warmup + 500:
         raise RuntimeError("Insufficient 1m bars after loading.")
-    regime = TSMOMRegime(cfg)
+    # Precompute resampled frames once (no look-ahead; we slice by ts in-loop)
+    df5  = resample_ohlcv(df1m, '5min')
+    atr5 = atr(df5, int(cfg['waves']['zigzag']['atr_window']))
+    regime = TSMOMRegime(cfg, df1m)
     waves = WaveGate(cfg)
 
     risk_cfg = RiskCfg(
@@ -39,21 +42,20 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     # Precompute ATR for speed
     atr_series = atr(df1m, risk_cfg.atr_window)
 
-    total_bars = max(0, len(df1m) - warmup)
     iterator = range(warmup, len(df1m))
-    if cfg['logging']['progress']:
-        iterator = tqdm(iterator, desc=f"Backtest {symbol}", ncols=100)
+    stride = int(cfg['logging'].get('progress_stride', 50))
+    total_bars = len(df1m) - warmup
 
     blockers = {'regime_flat':0, 'wave_not_armed':0, 'trigger_fail':0}
     for i in iterator:
-        # external progress hook (bars processed)
-        if progress_hook is not None:
+        row = df1m.iloc[i]
+        ts = row.name
+        # external progress hook (throttled)
+        if progress_hook is not None and (i == len(df1m)-1 or ((i - warmup) % max(1, stride) == 0)):
             try:
                 progress_hook(symbol, i - warmup, total_bars)
             except Exception:
                 pass
-        window = df1m.iloc[:i+1]
-        row = df1m.iloc[i]
 
         # Manage open trade
         if trade is not None and not trade.get('exit'):
@@ -73,16 +75,18 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             continue
 
         # No open trade -> check gates and trigger
-        side = regime.decide(window)
+        side = regime.decide_at(ts)
         if side == FLAT:
             blockers['regime_flat'] += 1
             continue
 
-        wave_state = waves.compute(window)
+        wave_state = waves.compute_at(df5, atr5, ts)
         if (not wave_state.get('armed')) or wave_state.get('dir') != side:
             blockers['wave_not_armed'] += 1
             continue
 
+        # Use df1m up-to-ts for trigger calcs (causal)
+        window = df1m.iloc[:i+1]
         trig = momentum_ignition(window, wave_state, side, cfg)
         if not trig:
             blockers['trigger_fail'] += 1
