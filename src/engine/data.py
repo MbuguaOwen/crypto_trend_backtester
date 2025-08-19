@@ -1,8 +1,8 @@
 
 import os
 import pandas as pd
-from .utils import ensure_datetime_utc
 import numpy as np
+from .utils import ensure_datetime_utc
 from tqdm import tqdm
 
 def _infer_timestamp_col(cols):
@@ -33,13 +33,29 @@ def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
     p_col  = _infer_price_col(df.columns)
     q_col  = _infer_qty_col(df.columns)
     ts = df[ts_col]
-    # handle ms/seconds/iso → ALWAYS wrap into DatetimeIndex then floor
+    # Always coerce to a DatetimeIndex, supporting mixed content robustly.
+    # 1) If numeric-like → choose ms vs s by magnitude
     if pd.api.types.is_integer_dtype(ts) or pd.api.types.is_float_dtype(ts):
-        ts = ts.astype('int64')
-        unit = 'ms' if float(ts.median()) > 1e12 else 's'
-        dt = pd.to_datetime(ts, unit=unit, utc=True)
+        ts = pd.to_numeric(ts, errors='coerce')
+        unit = 'ms' if float(ts.dropna().median()) > 1e12 else 's'
+        dt = pd.to_datetime(ts, unit=unit, utc=True, errors='coerce')
     else:
-        dt = pd.to_datetime(ts, utc=True)
+        # string/mixed → strip quotes/whitespace then parse with format='mixed' if available
+        s = ts.astype(str).str.strip().str.replace('"','', regex=False).replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
+        try:
+            # pandas >= 2.0 supports format='mixed'
+            dt = pd.to_datetime(s, utc=True, format='mixed', errors='coerce')
+        except TypeError:
+            # fallback: ISO8601 first, then general inference
+            try:
+                dt = pd.to_datetime(s, utc=True, format='ISO8601', errors='coerce')
+            except Exception:
+                dt = pd.to_datetime(s, utc=True, errors='coerce')
+    # Drop rows that failed to parse
+    bad = dt.isna()
+    if bad.any():
+        df = df.loc[~bad].copy()
+        dt = dt[~bad]
     # use 'min' (not 'T') to avoid FutureWarning
     idx = pd.DatetimeIndex(dt).floor('min')
     df.index = idx

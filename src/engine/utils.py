@@ -3,14 +3,10 @@ import numpy as np
 import pandas as pd
 
 def _normalize_rule(rule: str) -> str:
-    """
-    Normalize pandas offset aliases to avoid FutureWarnings:
-      'T' → 'min', 'H' → 'h'
-      Works for composites like '5T' → '5min'
-    """
+    """Normalize pandas offset aliases to avoid FutureWarnings."""
     r = str(rule)
-    r = r.replace('T', 'min')
-    r = r.replace('H', 'h')
+    r = r.replace('T', 'min')  # '5T' → '5min'
+    r = r.replace('H', 'h')    # '1H' → '1h'
     return r
 
 def ensure_datetime_utc(s):

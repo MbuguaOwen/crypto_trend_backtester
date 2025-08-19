@@ -130,9 +130,9 @@ class WaveGate:
         # pad to last 5m bar at/<= ts
         if ts < df5_all.index[0]:
             return {'armed': False}
-        try:
-            j = df5_all.index.get_loc(ts, method='pad')
-        except KeyError:
+        # Find the most recent 5m bar ≤ ts
+        j = df5_all.index.get_indexer([ts], method='pad')[0]
+        if j == -1:
             return {'armed': False}
         start = max(0, j - self.max_lookback_bars)
         df5 = df5_all.iloc[start:j+1]
@@ -158,7 +158,11 @@ class WaveGate:
             W2_high = w['w2_end'][1]
 
         # Age check
-        age_bars = (len(df5) - 1) - df5.index.get_loc(w['w1_end'][0])
+        pos_end = df5.index.get_indexer([w['w1_end'][0]])[0]
+        if pos_end == -1:
+            armed = False
+            pos_end = len(df5) - 1
+        age_bars = (len(df5) - 1) - pos_end
         if age_bars > self.max_age_impulse_bars:
             armed = False
 
