@@ -17,9 +17,9 @@ class TSMOMRegime:
             if tf == "1m":
                 closes = df1m['close']
             elif tf == "5m":
-                closes = resample_ohlcv(df1m, '5T')['close']
+                closes = resample_ohlcv(df1m, '5min')['close']
             elif tf == "15m":
-                closes = resample_ohlcv(df1m, '15T')['close']
+                closes = resample_ohlcv(df1m, '15min')['close']
             elif tf == "1h":
                 closes = resample_ohlcv(df1m, '1H')['close']
             else:
