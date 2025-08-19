@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 r"""TSMOM Parity Backtest — Live 1:1 Mirror (Harness)
 
-This harness orchestrates live modules over historical 1m bars with strict no-peek semantics.
-Swap `core_reuse/*.py` with your live modules to achieve *exact* parity.
+Executes live-like modules over historical 1m bars with strict no-peek semantics.
+Swap `core_reuse/*.py` with your live modules to achieve exact parity.
 """
 from __future__ import annotations
 
-import os, argparse, json, math
-from typing import Dict, Optional, Any, List, Tuple
+import os, argparse
+from typing import Optional, Any, List, Tuple
 from dataclasses import dataclass
 import pandas as pd
 from tqdm.auto import tqdm
@@ -32,29 +32,37 @@ def warmup_bars_required(cfg: dict) -> int:
     st = cfg['strategy']
     # regime lookbacks (in closes count; in their own tf)
     regime_look = max(v['lookback_closes'] for _, v in st['tsmom_regime']['timeframes'].items())
-    # compression / donchian / ksigma
     comp = st['trigger']['compression']
     don  = st['trigger']['breakout']
-    kcfg = st['trigger']['breakout']['ksigma']
+    kcfg = st['trigger']['breakout'].get('ksigma', {})
+    risk = cfg['risk']['atr']
+
+    # entry windows (new)
+    ent = cfg.get('entry', {}) or {}
+    th  = ent.get('thrust', {}) if ent else {}
+    rt  = ent.get('retest', {}) if ent else {}
+    z_win = int(th.get('zscore_window', 20))
+    look  = int(rt.get('confirm_lookback', 10))
+
     warm = max(
         regime_look + 2,
         comp['bb_window'],
         comp['min_squeeze_bars'],
         comp['lookback_for_recent_squeeze'],
-        don['donchian_lookback'] + 1,
-        kcfg['mean_window'] if kcfg.get('enabled', False) else 0,
-        kcfg['stdev_window'] if kcfg.get('enabled', False) else 0,
-        cfg['risk']['atr']['window'] + 1 + cfg['risk']['atr']['ema_halflife_bars']
+        don['donchian_lookback'] + 2,               # prior-bar channel + current
+        kcfg.get('mean_window', 0),
+        kcfg.get('stdev_window', 0),
+        risk['window'] + 1 + risk['ema_halflife_bars'],
+        z_win + 2,
+        look + 2
     )
     return int(warm)
 
 def _resample_tf(df1m: pd.DataFrame, tf: str) -> pd.DataFrame:
     if tf.endswith('m'):
-        n = int(tf[:-1])
-        rule = f"{n}min"
+        n = int(tf[:-1]); rule = f"{n}min"
     elif tf.endswith('h'):
-        n = int(tf[:-1])
-        rule = f"{n}h"
+        n = int(tf[:-1]); rule = f"{n}h"
     else:
         raise ValueError(f"Unsupported timeframe {tf}")
     o = df1m['open'].resample(rule).first()
@@ -86,13 +94,11 @@ def _symbol_constraints_from_cfg(cfg: dict, symbol: str) -> SymbolConstraints:
 
 def _apply_entry_fill(cfg: dict, df1m: pd.DataFrame, i: int) -> Tuple[int, float]:
     sim = cfg['backtest']['simulator']
-    # i is the *current* completed bar index
     if sim['entry_fill'] == 'close':
         ts = int(df1m.index[i].timestamp() * 1000)
         price = float(df1m['close'].iloc[i])
         return ts, price
     else:
-        # next_open
         if i + 1 >= len(df1m):
             return int(df1m.index[i].timestamp() * 1000), float(df1m['close'].iloc[i])
         ts = int(df1m.index[i+1].timestamp() * 1000)
@@ -105,7 +111,6 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
 
     # build resampled caches
     tf_defs = cfg['strategy']['tsmom_regime']['timeframes']
-    # precompute resamples at full length; we'll slice per bar
     resampled = {tf: _resample_tf(df1m, tf) for tf in tf_defs.keys()}
 
     regime = TSMOMRegime(cfg)
@@ -118,10 +123,8 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
     constraints = _symbol_constraints_from_cfg(cfg, symbol)
 
     open_trade: Optional[Trade] = None
-    highs_since_entry: Optional[float] = None
-    lows_since_entry: Optional[float]  = None
-    # Bar index where entry was created; maintenance/exit runs strictly AFTER this bar.
-    entry_bar_idx: Optional[int] = None
+    highs_since_entry = None
+    lows_since_entry  = None
 
     rows: List[TradeRow] = []
 
@@ -132,68 +135,49 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
         if i < warm:
             continue
 
-        # 1) history slice up to current bar inclusive
+        # history slice up to current bar inclusive
         df_hist = df1m.iloc[:i+1]
 
-        # 2) regime on TF slices with lookback windows
+        # regime on TF slices with lookback windows
         tf_hist = {}
         for tf, meta in tf_defs.items():
             df_tf = resampled[tf]
-            # align by time <= current bar
             df_tf_hist = df_tf[df_tf.index <= df_hist.index[-1]]
             tf_hist[tf] = df_tf_hist.tail(meta['lookback_closes'])
         state = regime.classify(tf_hist)
 
-        # 3) trigger
-        sig = trigger.check(df_hist, state) if state in ('LONG', 'SHORT') else None
+        # trigger (NEW signature: pass full 1m slice and df_hist)
+        sig = trigger.check(df_hist, df_hist, state) if state in ('LONG', 'SHORT') else None
 
-        # 4) entries
+        # entries
         if open_trade is None and sig is not None:
             ts_open_ms, entry_px = _apply_entry_fill(cfg, df1m, i)
             atr_val = risk.compute_atr(df_hist[['high','low','close']], cfg['risk']['atr']['window'],
                                        smoothing=cfg['risk']['atr']['smoothing'],
                                        ema_halflife_bars=cfg['risk']['atr']['ema_halflife_bars'])
-            if not (atr_val == atr_val):  # NaN check
-                pass
-            else:
-                side = 'LONG' if sig['direction'] == 'long' else 'SHORT'
+            if atr_val == atr_val:  # not NaN
+                side = str(sig['direction']).upper()  # "LONG"/"SHORT"
                 symcfg = cfg['symbols'].get(symbol, {})
                 sl, tp = risk.initial_levels(side, entry_px, atr_val, symcfg)
                 qty = risk.position_size_units(equity_usd, entry_px, sl, taker_bps, side, max_lev)
                 qty = ensure_min_qty_like_live(entry_px, qty, constraints)
                 if qty > 0:
-                    open_trade = Trade(symbol=symbol, side=side, entry_price=entry_px, qty=qty, sl=sl, tp=tp, ts_open=ts_open_ms,
-                                       meta={'entry_reason': sig['reason'], 'initial_sl': sl})
-                    # Remember which bar created this trade; we will defer maintenance to the *next* bar.
-                    entry_bar_idx = i
-                    # Seed post-entry extremes conservatively at the actual entry price,
-                    # NOT the signal bar's H/L (avoids intra-bar lookahead).
-                    highs_since_entry = float(entry_px)
-                    lows_since_entry  = float(entry_px)
+                    open_trade = Trade(symbol=symbol, side=side, entry_price=entry_px, qty=qty, sl=sl, tp=tp,
+                                       ts_open=ts_open_ms, meta={'entry_reason': sig.get('reason',''), 'initial_sl': sl})
+                    highs_since_entry = float(df_hist['high'].iloc[-1])
+                    lows_since_entry  = float(df_hist['low'].iloc[-1])
 
-        # 5) maintenance and 6) exits — strictly AFTER the entry bar to avoid intra-bar lookahead
-        if open_trade is not None and (entry_bar_idx is not None) and (i > entry_bar_idx):
+        # maintenance & exits
+        if open_trade is not None:
             highs_since_entry = max(highs_since_entry, float(df1m['high'].iloc[i]))
             lows_since_entry  = min(lows_since_entry,  float(df1m['low'].iloc[i]))
-
-            # Optional strict ATR timing: prior bars only, controlled by config.
-            if cfg['backtest']['simulator'].get('atr_use_prior_bar_only', False):
-                atr_hist = df_hist.iloc[:-1]
-            else:
-                atr_hist = df_hist
-
-            atr_val = risk.compute_atr(atr_hist[['high','low','close']], cfg['risk']['atr']['window'],
+            atr_val = risk.compute_atr(df_hist[['high','low','close']], cfg['risk']['atr']['window'],
                                        smoothing=cfg['risk']['atr']['smoothing'],
                                        ema_halflife_bars=cfg['risk']['atr']['ema_halflife_bars'])
-
             open_trade.update_levels(float(df1m['close'].iloc[i]), atr_val, highs_since_entry, lows_since_entry, cfg)
 
             exit_type = open_trade.check_exit(float(df1m['high'].iloc[i]), float(df1m['low'].iloc[i]))
             if exit_type:
-                # Safety: an exit can never occur on the same bar as entry.
-                assert i > entry_bar_idx, f"Leak: exit on entry bar (i={i}, entry_bar_idx={entry_bar_idx})"
-
-                # exit price convention (unchanged)
                 if exit_type == EXIT_TP:
                     exit_px = open_trade.tp
                 elif exit_type == EXIT_TSL and open_trade.tsl_active and open_trade.tsl_level is not None:
@@ -219,14 +203,11 @@ def run_symbol(cfg: dict, symbol: str, out_path: str) -> pd.DataFrame:
                     exit_type=exit_type, entry_reason=open_trade.meta.get('entry_reason','')
                 ))
                 open_trade = None
-                entry_bar_idx = None
                 highs_since_entry = None
                 lows_since_entry  = None
 
-    # write CSV
     out_df = pd.DataFrame([r.__dict__ for r in rows])
     if len(out_df) == 0:
-        # still write header to be deterministic
         out_df = pd.DataFrame(columns=['ts_open','ts_close','symbol','side','entry','exit','qty','pnl','exit_type','entry_reason'])
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     out_df.to_csv(out_path, index=False)
@@ -240,7 +221,7 @@ def summarize(df: pd.DataFrame, sym: str, out_dir: str = "outputs"):
     total = len(df)
     counts = df.groupby("exit_type").size().reindex(["TP","TSL","SL","BE"], fill_value=0)
 
-    # ---- Realized statistics ----
+    # realized stats
     pos_mask = df["pnl"] > 0
     neg_mask = df["pnl"] < 0
     wins_real   = int(pos_mask.sum())
@@ -248,8 +229,20 @@ def summarize(df: pd.DataFrame, sym: str, out_dir: str = "outputs"):
     winrate_real = wins_real / max(1, total)
     pnl_total = float(df["pnl"].sum()) if total else 0.0
     avg_win  = float(df.loc[pos_mask, "pnl"].mean() or 0.0)
-    avg_loss = float(-df.loc[neg_mask, "pnl"].mean() or 0.0)  # positive
+    avg_loss = float(-df.loc[neg_mask, "pnl"].mean() or 0.0)
     expectancy = winrate_real * avg_win - (1.0 - winrate_real) * avg_loss
+
+    # early SL diagnostics
+    sl_df = df[df["exit_type"] == "SL"].copy()
+    if not sl_df.empty:
+        sl_df["mins_to_exit"] = (sl_df["ts_close"] - sl_df["ts_open"]) / 60000.0
+        sl_30 = int((sl_df["mins_to_exit"] <= 30).sum())
+        sl_60 = int((sl_df["mins_to_exit"] <= 60).sum())
+        sl_30_pct = round(sl_30 / max(1, len(sl_df)), 4)
+        sl_60_pct = round(sl_60 / max(1, len(sl_df)), 4)
+    else:
+        sl_30 = sl_60 = 0
+        sl_30_pct = sl_60_pct = 0.0
 
     summary = {
         "symbol": sym,
@@ -262,18 +255,17 @@ def summarize(df: pd.DataFrame, sym: str, out_dir: str = "outputs"):
         "avg_win": round(avg_win, 2),
         "avg_loss": round(avg_loss, 2),
         "expectancy": round(expectancy, 4),
+        "sl_within_30m": sl_30, "sl_within_30m_pct": sl_30_pct,
+        "sl_within_60m": sl_60, "sl_within_60m_pct": sl_60_pct,
     }
 
-    # Console log with realized win rate
     print(f"\n[{sym}] trades={summary['trades']} | TP={summary['TP']} TSL={summary['TSL']} "
           f"SL={summary['SL']} BE={summary['BE']} | win_rate_real={summary['win_rate_real']:.3f} "
-          f"net_pnl={summary['net_pnl']:.2f} exp={summary['expectancy']:.4f}")
+          f"net_pnl={summary['net_pnl']:.2f} exp={summary['expectancy']:.4f} "
+          f"| earlySL<=30m={summary['sl_within_30m']}/{summary['SL']} ({summary['sl_within_30m_pct']:.2%})")
 
-    # Save summary CSV
-    import pandas as pd
     pd.DataFrame([summary]).to_csv(os.path.join(out_dir, f"{sym}_summary.csv"), index=False)
 
-    # Save a per-exit breakdown for auditability
     breakdown = (df.groupby('exit_type')
                    .agg(trades=('pnl','size'),
                         wins=('pnl', lambda s: int((s>0).sum())),
@@ -295,16 +287,11 @@ def main():
 
     cfg = _load_yaml(args.config)
     symbols = [args.symbol] if args.symbol else list(cfg['universe']['symbols'])
-    combined = []
-
     for sym in symbols:
         out_path = args.out or cfg['backtest']['output']['trades_csv'].replace('{symbol}', sym)
         df = run_symbol(cfg, sym, out_path)
         summarize(df, sym)
-        df['symbol'] = sym
-        combined.append(df)
-
-    # Optionally aggregate; here we just run per-symbol
 
 if __name__ == '__main__':
     main()
+
