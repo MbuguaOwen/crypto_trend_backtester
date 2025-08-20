@@ -46,9 +46,9 @@ entry:
     zscore_window: 20
     zscore_k: 1.7
     min_body_dom: 0.55
-    range_atr_min: 1.2
+    range_atr_min: 1.7
   breakout:
-    buffer_atr_mult: 0.40
+    buffer_atr_mult: 0.20
 
 risk:
   atr:
@@ -59,8 +59,8 @@ risk:
   be:
     trigger_r_multiple: 0.5
   tsl:
-    start_r_multiple: 15.0
-    atr_mult: 1.0
+    start_r_multiple: 1.0
+    atr_mult: 15.0
 
 position:
   qty_mode: "notional"  # "units" or "notional"

@@ -1,14 +1,14 @@
 [
   {
     "symbol": "BTCUSDT",
-    "error": "'Series' object has no attribute 'floor'"
+    "error": "time data \"2025-07-01 00:02:04+00:00\" doesn't match format \"%Y-%m-%d %H:%M:%S.%f%z\", at position 598. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
   },
   {
     "symbol": "ETHUSDT",
-    "error": "'Series' object has no attribute 'floor'"
+    "error": "DatetimeIndex.get_loc() got an unexpected keyword argument 'method'"
   },
   {
     "symbol": "SOLUSDT",
-    "error": "'Series' object has no attribute 'floor'"
+    "error": "time data \"2025-07-01 00:02:15+00:00\" doesn't match format \"%Y-%m-%d %H:%M:%S.%f%z\", at position 470. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
   }
 ]
