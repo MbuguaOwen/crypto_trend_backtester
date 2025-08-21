@@ -55,12 +55,18 @@ risk:
     window: 14
   sl:
     mode: "structure_or_atr"
-    atr_mult: 15.0
+    atr_mult: 5.0
   be:
     trigger_r_multiple: 0.5
+    buffer:
+      # Choose the effective BE buffer as the MAX of the enabled components
+      r_multiple: 0.05         # extra margin in R units (e.g., 0.05R)
+      fees_bps_round_trip: 10  # total entry+exit fees in basis points (0.10%)
+      slippage_bps: 5          # expected round-trip slippage in bps
+      take_max: true           # use the largest among the enabled terms
   tsl:
     start_r_multiple: 1.0
-    atr_mult: 15.0
+    atr_mult: 3.0
 
 position:
   qty_mode: "notional"  # "units" or "notional"
