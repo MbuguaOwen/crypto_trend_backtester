@@ -60,7 +60,7 @@ risk:
     trigger_r_multiple: 0.5
   tsl:
     start_r_multiple: 4.0
-    atr_mult: 15.0
+    atr_mult: 10.0
 
 position:
   qty_mode: "notional"  # "units" or "notional"
