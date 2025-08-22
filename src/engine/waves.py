@@ -13,6 +13,18 @@ class WaveGate:
         self.max_lookback_ev = int(cfg['waves']['zigzag']['max_lookback_bars'])
         self.min_cov_minutes = 300    # ≥5h underlying coverage
 
+        # Precompute TR and its cumulative sum for O(1) rolling means
+        self.ev_tr = (self.df_event['high'] - self.df_event['low']).abs()
+        self.ev_tr_cum = self.ev_tr.cumsum()
+
+    # fast rolling mean using cumsum; j_end inclusive
+    def _rolling_mean_fast(self, j_end: int, w: int) -> float:
+        if w <= 0:
+            return float('nan')
+        j0 = max(0, j_end - w + 1)
+        cum = float(self.ev_tr_cum.iat[j_end]) - (float(self.ev_tr_cum.iat[j0 - 1]) if j0 > 0 else 0.0)
+        return cum / float(j_end - j0 + 1)
+
     # --- PREWARM: walk event bars up to ts_end and record W2 candidates for quantiles
     def prewarm_until(self, ts_end: pd.Timestamp):
         dfe = self.df_event
@@ -34,20 +46,30 @@ class WaveGate:
                 continue
             if (i1 - i0 + 1) < self.min_cov_minutes:
                 continue
-            tr = (ev['high'] - ev['low']).abs()
+
+            # use median window as prewarm approximation
             aw_min, aw_max = self.cfg['waves']['adaptive']['atr_window_range']
-            atr_ev = tr.rolling(int((aw_min + aw_max) // 2), min_periods=int((aw_min + aw_max) // 2)).mean()
+            w = int((aw_min + aw_max) // 2)
+            if w <= 0 or len(ev) < w:
+                continue
+
+            # compute atr_ev via cumsum fast-path for the small slice
+            j_end = self.df_event.index.get_indexer([ev.index[-1]], method='pad')[0]
+            j_start = j_end - (len(ev) - 1)
+            atr_vals = [self._rolling_mean_fast(j, w) for j in range(j_start, j_end + 1)]
+            atr_ev = pd.Series(atr_vals, index=ev.index)
             if atr_ev.isna().all():
                 continue
+
             am_min, am_max = self.cfg['waves']['adaptive']['atr_mult_range']
             piv = self._zigzag_atr(ev, atr_ev, (am_min + am_max) / 2.0)
-            w = self._w1_w2_from_pivots(piv)
-            if w is None:
+            wv = self._w1_w2_from_pivots(piv)
+            if wv is None:
                 continue
-            armed, score, post, conf = self._score_w2(ev, w, 0.62, 0.60, 0.60)
+            armed, score, post, conf = self._score_w2(ev, wv, 0.62, 0.60, 0.60)
             if not armed:
                 continue
-            pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
+            pos_end = ev.index.get_indexer([wv['w1_end'][0]], method='pad')[0]
             if pos_end == -1:
                 continue
             age_bars = (len(ev) - 1) - pos_end
@@ -78,21 +100,28 @@ class WaveGate:
             return {'armed': False}
 
         p: WaveParams = self.ac.waves_params(i_bar_1m)
-        tr = (ev['high'] - ev['low']).abs()
-        atr_ev = tr.rolling(p.atr_window, min_periods=p.atr_window).mean()
+
+        # fast ATR over event bars via cumsum
+        w = int(p.atr_window)
+        if w <= 0:
+            return {'armed': False}
+        j_end = self.df_event.index.get_indexer([ev.index[-1]], method='pad')[0]
+        j_start = j_end - (len(ev) - 1)
+        atr_vals = [self._rolling_mean_fast(jj, w) for jj in range(j_start, j_end + 1)]
+        atr_ev = pd.Series(atr_vals, index=ev.index)
         if atr_ev.isna().all():
             return {'armed': False}
 
         piv = self._zigzag_atr(ev, atr_ev, p.atr_mult0)
-        w = self._w1_w2_from_pivots(piv)
-        if w is None:
+        wv = self._w1_w2_from_pivots(piv)
+        if wv is None:
             return {'armed': False}
 
-        armed, score, post, conf = self._score_w2(ev, w, p.w2_end_arm, p.w2_post_min, p.min_conf)
+        armed, score, post, conf = self._score_w2(ev, wv, p.w2_end_arm, p.w2_post_min, p.min_conf)
         if not armed:
             return {'armed': False}
 
-        pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
+        pos_end = ev.index.get_indexer([wv['w1_end'][0]], method='pad')[0]
         if pos_end == -1:
             return {'armed': False}
         age_bars = (len(ev) - 1) - pos_end
@@ -101,16 +130,16 @@ class WaveGate:
 
         self.ac.record_w2(score, post, conf, age_bars)
 
-        if w['dir'] == 'LONG':
-            w2_high = w['w1_end'][1]
-            w2_low = w['w2_end'][1]
+        if wv['dir'] == 'LONG':
+            w2_high = wv['w1_end'][1]
+            w2_low = wv['w2_end'][1]
         else:
-            w2_low = w['w1_end'][1]
-            w2_high = w['w2_end'][1]
+            w2_low = wv['w1_end'][1]
+            w2_high = wv['w2_end'][1]
 
         return {
             'armed': True,
-            'dir': w['dir'],
+            'dir': wv['dir'],
             'w2_high': w2_high,
             'w2_low': w2_low,
             'score': score,
