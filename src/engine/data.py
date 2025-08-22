@@ -1,8 +1,50 @@
 import os
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from tqdm import tqdm
 from typing import Tuple, Optional
+
+
+def _safe_read_csv(path: str):
+    """
+    Fast-path typed read (when known). Falls back to generic read if columns differ.
+    """
+    try:
+        return pd.read_csv(
+            path,
+            dtype={
+                # typed where common; silently ignored if column not present
+                "timestamp": "int64",
+                "price": "float64",
+                "qty": "float64",
+                "quoteQty": "float64",
+            }
+        )
+    except Exception:
+        return pd.read_csv(path)
+
+
+def _save_frame(df: pd.DataFrame, pq_path: Path):
+    try:
+        import pyarrow  # noqa: F401
+        df.to_parquet(pq_path, index=True)
+        return "parquet"
+    except Exception:
+        # fallback: pickle to .pkl next to parquet
+        pkl_path = pq_path.with_suffix(".pkl")
+        df.to_pickle(pkl_path)
+        return "pickle"
+
+
+def _load_cached(pq_path: Path):
+    # prefer parquet; fallback to pickle
+    if pq_path.exists():
+        return pd.read_parquet(pq_path)
+    pkl_path = pq_path.with_suffix(".pkl")
+    if pkl_path.exists():
+        return pd.read_pickle(pkl_path)
+    return None
 
 
 PRICE_ALIASES = ["price", "p", "last", "trade_price"]
@@ -163,30 +205,50 @@ def ticks_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
+    """
+    Loads 1m OHLCV from tick CSVs with on-disk caching:
+      data/<symbol>/<symbol>-ticks-YYYY-MM.csv
+    Cache location:
+      data/_cache_1m/<symbol>/<symbol>-1m-YYYY-MM.parquet  (or .pkl fallback)
+
+    Identical resampling logic; results are bit-for-bit identical to in-memory resample.
+    """
+    cache_dir = Path(inputs_dir) / "_cache_1m" / symbol
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
     frames = []
     iterator = months
     bar = None
     if progress:
+        from tqdm import tqdm
         bar = tqdm(months, desc=f"{symbol} months", ncols=100, leave=False)
         iterator = bar
+
     for m in iterator:
-        fn = f"{symbol}/{symbol}-ticks-{m}.csv"
-        path = os.path.join(inputs_dir, fn)
-        if not os.path.exists(path):
-            if not progress:
-                print(f"[{symbol}] MISSING {m} → {os.path.basename(fn)}")
-            continue
-        if progress and bar is not None:
-            bar.set_postfix_str(m)
-        else:
-            print(f"[{symbol}] Loading {m} → {os.path.basename(path)}")
-        # Let the parser handle the timestamp type
-        df_ticks = pd.read_csv(path)
-        frames.append(ticks_to_1m(df_ticks))
+        csv_path = Path(inputs_dir) / f"{symbol}/{symbol}-ticks-{m}.csv"
+        pq_path  = cache_dir / f"{symbol}-1m-{m}.parquet"
+
+        df_1m = _load_cached(pq_path)
+        if df_1m is None:
+            if not csv_path.exists():
+                if not progress:
+                    print(f"[{symbol}] MISSING {m} → {csv_path.name}")
+                continue
+            if progress and bar is not None:
+                bar.set_postfix_str(m)
+            # robust parser + typed fast-path
+            df_ticks = _safe_read_csv(str(csv_path))
+            df_1m = ticks_to_1m(df_ticks)
+            _save_frame(df_1m, pq_path)
+
+        frames.append(df_1m)
+
     if bar is not None:
         bar.close()
+
     if not frames:
         raise FileNotFoundError(f"No monthly files found for {symbol}. Looked for months={months}.")
+
     df = pd.concat(frames).sort_index()
     df = df[~df.index.duplicated(keep='last')]
     return df

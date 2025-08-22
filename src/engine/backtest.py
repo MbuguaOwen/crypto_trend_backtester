@@ -57,6 +57,9 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     stride = int(cfg['logging'].get('progress_stride', 200))
     total_bars = len(df1m) - start_i
 
+    iloc = df1m.iloc
+    idx = df1m.index
+
     blockers = {'regime_flat': 0, 'wave_not_armed': 0, 'trigger_fail': 0}
 
     for i in range(start_i, len(df1m)):
@@ -65,11 +68,12 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
                 progress_hook(symbol, i - start_i + 1, total_bars)
             except Exception:
                 pass
-        ts = df1m.index[i]
+        ts = idx[i]
 
+        row = iloc[i]
         if trade is not None and not trade.get('exit'):
-            risk.update_trade(trade, df1m.iloc[i], i)
-            risk.check_exit(trade, df1m.iloc[i])
+            risk.update_trade(trade, row, i)
+            risk.check_exit(trade, row)
             if trade.get('exit'):
                 r0 = trade['r0']
                 if trade['direction'] == 'LONG':
@@ -105,7 +109,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             continue
 
         direction = 'LONG' if reg['dir'] == 'BULL' else 'SHORT'
-        entry = df1m['close'].iloc[i]
+        entry = row['close']
         stop0 = risk.initial_stop(entry, direction, wv, i)
         r0 = entry - stop0 if direction == 'LONG' else stop0 - entry
         r0 = max(1e-9, r0)
@@ -133,7 +137,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
         }
 
     if trade is not None and not trade.get('exit'):
-        last = df1m.iloc[-1]
+        last = iloc[-1]
         trade['exit'] = float(last['close'])
         trade['exit_reason'] = 'EOD'
         if trade['direction'] == 'LONG':
