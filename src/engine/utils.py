@@ -2,12 +2,17 @@
 import numpy as np
 import pandas as pd
 
+
 def _normalize_rule(rule: str) -> str:
     """Normalize pandas offset aliases to avoid FutureWarnings."""
     r = str(rule)
-    r = r.replace('T', 'min')  # '5T' → '5min'
-    r = r.replace('H', 'h')    # '1H' → '1h'
-    return r
+    aliases = {
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        "5T": "5min",
+    }
+    return aliases.get(r, r)
 
 def ensure_datetime_utc(s):
     s = pd.to_datetime(s, utc=True)
@@ -31,9 +36,12 @@ def body_dom(row):
 def zscore_logret(close: pd.Series, win: int = 20) -> pd.Series:
     lr = np.log(close / close.shift(1)).fillna(0.0)
     mu = lr.rolling(win, min_periods=1).mean()
-    sd = lr.rolling(win, min_periods=1).std(ddof=0).replace(0, np.nan)
-    z = (lr - mu) / sd
-    return z.fillna(0.0)
+    sd = lr.rolling(win, min_periods=1).std(ddof=0)
+    arr_lr, arr_mu, arr_sd = lr.to_numpy(), mu.to_numpy(), sd.to_numpy()
+    z = np.zeros_like(arr_lr)
+    np.divide(arr_lr - arr_mu, arr_sd, out=z, where=(arr_sd > 0))
+    np.nan_to_num(z, copy=False)
+    return pd.Series(z, index=close.index)
 
 def resample_ohlcv(df1m: pd.DataFrame, rule: str) -> pd.DataFrame:
     rule = _normalize_rule(rule)
@@ -70,7 +78,9 @@ def zscore_logret_vec(close: np.ndarray, win: int) -> np.ndarray:
     lr[0] = 0.0
     mu = pd.Series(lr).rolling(win, min_periods=1).mean().to_numpy()
     sd = pd.Series(lr).rolling(win, min_periods=1).std(ddof=0).to_numpy()
-    z = np.where(sd > 0, (lr - mu) / sd, 0.0)
+    z = np.zeros_like(lr)
+    np.divide(lr - mu, sd, out=z, where=(sd > 0))
+    np.nan_to_num(z, copy=False)
     return z
 
 
