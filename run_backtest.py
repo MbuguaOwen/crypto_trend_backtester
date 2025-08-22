@@ -8,7 +8,8 @@ from tqdm import tqdm
 # top-level (picklable) progress printer for single-worker mode
 def progress_printer(symbol: str, done: int, total: int, bar_dict={}):
     if symbol not in bar_dict:
-        bar_dict[symbol] = tqdm(total=total, desc=symbol, ncols=100, position=len(bar_dict))
+        # leave=True so bars don't disappear after completion
+        bar_dict[symbol] = tqdm(total=total, desc=symbol, ncols=100, position=len(bar_dict), leave=True)
     bar = bar_dict[symbol]
     bar.n = done
     bar.refresh()
