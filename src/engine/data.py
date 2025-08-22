@@ -1,75 +1,34 @@
 
 import os
 import pandas as pd
-import numpy as np
-from .utils import ensure_datetime_utc
 from tqdm import tqdm
 
-def _infer_timestamp_col(cols):
-    for c in cols:
-        lc = c.lower()
-        if lc in ('timestamp','ts','time','datetime','date'):
-            return c
-    raise ValueError("No timestamp-like column found. Expected one of: timestamp, ts, time, datetime.")
 
-def _infer_price_col(cols):
-    for c in cols:
-        lc = c.lower()
-        if lc in ('price','p','last','close'):
-            return c
-    raise ValueError("No price-like column found. Expected one of: price, p, last, close.")
+def read_ticks(path):
+    usecols = ["timestamp", "price", "quantity", "is_buyer_maker"]
+    try:
+        df = pd.read_csv(path, usecols=usecols, engine="pyarrow", memory_map=True)
+    except Exception:
+        df = pd.read_csv(path, usecols=usecols)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, infer_datetime_format=True)
+    df = df.sort_values('timestamp')
+    return df
 
-def _infer_qty_col(cols):
-    for c in cols:
-        lc = c.lower()
-        if lc in ('qty','quantity','amount','size','volume','vol'):
-            return c
-    # volume not strictly required; use 1
-    return None
 
-def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    ts_col = _infer_timestamp_col(df.columns)
-    p_col  = _infer_price_col(df.columns)
-    q_col  = _infer_qty_col(df.columns)
-    ts = df[ts_col]
-    # Always coerce to a DatetimeIndex, supporting mixed content robustly.
-    # 1) If numeric-like → choose ms vs s by magnitude
-    if pd.api.types.is_integer_dtype(ts) or pd.api.types.is_float_dtype(ts):
-        ts = pd.to_numeric(ts, errors='coerce')
-        unit = 'ms' if float(ts.dropna().median()) > 1e12 else 's'
-        dt = pd.to_datetime(ts, unit=unit, utc=True, errors='coerce')
-    else:
-        # string/mixed → strip quotes/whitespace then parse with format='mixed' if available
-        s = ts.astype(str).str.strip().str.replace('"','', regex=False).replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
-        try:
-            # pandas >= 2.0 supports format='mixed'
-            dt = pd.to_datetime(s, utc=True, format='mixed', errors='coerce')
-        except TypeError:
-            # fallback: ISO8601 first, then general inference
-            try:
-                dt = pd.to_datetime(s, utc=True, format='ISO8601', errors='coerce')
-            except Exception:
-                dt = pd.to_datetime(s, utc=True, errors='coerce')
-    # Drop rows that failed to parse
-    bad = dt.isna()
-    if bad.any():
-        df = df.loc[~bad].copy()
-        dt = dt[~bad]
-    # use 'min' (not 'T') to avoid FutureWarning
-    idx = pd.DatetimeIndex(dt).floor('min')
-    df.index = idx
-    price = df[p_col].astype('float64')
-    vol = df[q_col].astype('float64') if q_col is not None else 1.0
-    out = pd.DataFrame({
-        'open': price.groupby(df.index).first(),
-        'high': price.groupby(df.index).max(),
-        'low' : price.groupby(df.index).min(),
-        'close': price.groupby(df.index).last(),
-        'volume': vol.groupby(df.index).sum()
-    }).dropna()
-    out.index.name = 'timestamp'
-    return out
+def ticks_to_ohlcv_1m(df):
+    # floor to minute
+    df['_minute'] = df['timestamp'].dt.floor('1min')
+    gp = df.groupby('_minute', sort=True)
+
+    o = gp['price'].first().rename("open")
+    h = gp['price'].max().rename("high")
+    l = gp['price'].min().rename("low")
+    c = gp['price'].last().rename("close")
+    v = gp['quantity'].sum().rename("volume")
+
+    bars = pd.concat([o, h, l, c, v], axis=1).reset_index().rename(columns={'_minute': 'time'})
+    bars.set_index('time', inplace=True)
+    return bars
 
 def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
     frames = []
@@ -89,7 +48,8 @@ def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
             bar.set_postfix_str(m)
         else:
             print(f"[{symbol}] Loading {m} → {os.path.basename(path)}")
-        frames.append(read_ticks_to_1m(path))
+        ticks = read_ticks(path)
+        frames.append(ticks_to_ohlcv_1m(ticks))
     if bar is not None:
         bar.close()
     if not frames:
