@@ -1,0 +1,18 @@
+{
+  "symbol": "ETHUSDT",
+  "trades": 13,
+  "win_rate": 0.07692307692307693,
+  "avg_R": -0.19140301383109162,
+  "median_R": -1.0,
+  "sum_R": -2.488239179804191,
+  "exits": {
+    "SL": 7,
+    "BE": 4,
+    "TSL": 2
+  },
+  "blockers": {
+    "regime_flat": 58649,
+    "wave_not_armed": 234723,
+    "trigger_fail": 9182
+  }
+}
