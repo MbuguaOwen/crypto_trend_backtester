@@ -1,43 +1,75 @@
-
+import numpy as np
 import pandas as pd
-from .utils import resample_ohlcv
 
-LONG, SHORT, FLAT = "LONG","SHORT","FLAT"
+TF_MAP = {
+    "1min": "1min",
+    "5min": "5min",
+    "15min": "15min",
+    "1h": "1H",
+    "5h": "5H",
+}
+
+BULL, BEAR, FLAT = "BULL", "BEAR", "FLAT"
+
+
+def _resample(df1m, tf):
+    if tf == "1min":
+        return df1m
+    rule = TF_MAP[tf]
+    return df1m.resample(rule, label='right', closed='right').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+
 
 class TSMOMRegime:
     def __init__(self, cfg: dict, df1m: pd.DataFrame):
-        self.tfs = cfg['regime']['timeframes']
-        self.require = int(cfg['regime']['vote']['require'])
-        # Precompute closes once (no look-ahead in decide_at)
-        self.closes = {
-            "1m": df1m['close'].copy()
-        }
-        self.closes["5m"]  = resample_ohlcv(df1m, '5min')['close']
-        self.closes["15m"] = resample_ohlcv(df1m, '15min')['close']
-        self.closes["1h"]  = resample_ohlcv(df1m, '1h')['close']
+        self.cfg = cfg
+        self.tf_specs = cfg['regime']['ts_mom']['timeframes']
+        self.require = int(cfg['regime']['ts_mom']['require_majority'])
+        self.frames = {spec['tf']: _resample(df1m, spec['tf']) for spec in self.tf_specs}
 
-    def decide_at(self, ts) -> str:
-        votes_long = 0
-        votes_short = 0
-        for tf, params in self.tfs.items():
-            lb = int(params['lookback_closes'])
-            if tf not in self.closes:
-                continue
-            closes = self.closes[tf]
-            # As-of TS (pad to last known bar ≤ ts)
-            if ts < closes.index[0]:
-                continue
-            c_now = closes[:ts].iloc[-1]
-            if len(closes[:ts]) <= lb:
-                continue
-            c_then = closes[:ts].shift(lb).dropna().iloc[-1]
-            mom = c_now / c_then - 1.0
-            if mom > 0:
-                votes_long += 1
-            elif mom < 0:
-                votes_short += 1
-        if votes_long >= self.require and votes_long > votes_short:
-            return LONG
-        if votes_short >= self.require and votes_short > votes_long:
-            return SHORT
-        return FLAT
+    def compute_at(self, ts) -> dict:
+        votes = []
+        strength_parts = []
+
+        for spec in self.tf_specs:
+            tf = spec['tf']
+            k = int(spec.get('lookback_closes', 3))
+            df = self.frames[tf]
+            if ts < df.index[0]:
+                return {'dir': FLAT, 'score': 0.0, 'strength': 0.0}
+            idx = df.index.get_indexer([ts], method='pad')[0]
+            if idx == -1:
+                return {'dir': FLAT, 'score': 0.0, 'strength': 0.0}
+            df_cut = df.iloc[:idx+1]
+            if len(df_cut) < (k+1):
+                return {'dir': FLAT, 'score': 0.0, 'strength': 0.0}
+
+            close = df_cut['close']
+            rets = [np.sign(close.iloc[-1] - close.shift(i).iloc[-1]) for i in range(1, k+1)]
+            s = int(np.sign(sum(rets)))
+            votes.append(s)
+
+            pct = [(close.iloc[-1] / close.shift(i).iloc[-1] - 1.0) for i in range(1, k+1)]
+            if np.all(np.isfinite(pct)):
+                x = np.array(pct, dtype=float)
+                if x.std() > 0:
+                    z = (x - x.mean()) / (x.std() + 1e-12)
+                    strength_parts.append(np.abs(z).mean())
+
+        bulls = sum(1 for v in votes if v > 0)
+        bears = sum(1 for v in votes if v < 0)
+        score = (bulls - bears) / max(1, len(self.tf_specs))
+
+        dir_ = FLAT
+        if bulls >= self.require:
+            dir_ = BULL
+        elif bears >= self.require:
+            dir_ = BEAR
+
+        strength = float(np.median(strength_parts)) if strength_parts else 0.0
+        return {'dir': dir_, 'score': float(score), 'strength': strength}

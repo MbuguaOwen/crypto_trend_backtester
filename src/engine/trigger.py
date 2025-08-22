@@ -11,7 +11,7 @@ def momentum_ignition(df1m: pd.DataFrame, wave_state: dict, regime_dir: str, cfg
         return None
 
     atr14 = atr(df1m, int(cfg['risk']['atr']['window'])).iloc[-1]
-    buf   = float(cfg['entry']['breakout']['buffer_atr_mult'])
+    buf   = float(cfg['entry']['momentum']['buffer_atr_mult'])
     last  = df1m.iloc[-1]
     prev_close = df1m['close'].iloc[-2]
 
@@ -24,11 +24,11 @@ def momentum_ignition(df1m: pd.DataFrame, wave_state: dict, regime_dir: str, cfg
     range_min = float(cfg['entry']['momentum']['range_atr_min'])
 
     if regime_dir == 'LONG':
-        lvl = float(wave_state['W2_high'] + buf * atr14)
+        lvl = float(wave_state['w2_high'] + buf * atr14)
         if (last['close'] >= lvl) and (zret >= z_k) and (body >= min_body) and (tratr >= range_min):
             return {'direction':'LONG', 'level': lvl, 'reason':'wavegate_momentum'}
     else:
-        lvl = float(wave_state['W2_low'] - buf * atr14)
+        lvl = float(wave_state['w2_low'] - buf * atr14)
         if (last['close'] <= lvl) and (zret <= -z_k) and (body >= min_body) and (tratr >= range_min):
             return {'direction':'SHORT', 'level': lvl, 'reason':'wavegate_momentum'}
     return None

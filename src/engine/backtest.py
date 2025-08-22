@@ -5,12 +5,13 @@ import numpy as np
 from tqdm import tqdm
 
 from .data import load_symbol_1m
-from .regime import TSMOMRegime, FLAT
+from .cusum import build_cusum_bars
+from .regime import TSMOMRegime
 from .waves import WaveGate
 from .trigger import momentum_ignition
 from .risk import RiskCfg, initial_stop, update_stops, check_exit
 
-from .utils import atr, resample_ohlcv
+from .utils import atr
 
 def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     inputs_dir = cfg['paths']['inputs_dir']
@@ -23,17 +24,27 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     if len(df1m) < warmup + 500:
         raise RuntimeError("Insufficient 1m bars after loading.")
     # Precompute resampled frames once (no look-ahead; we slice by ts in-loop)
-    df5  = resample_ohlcv(df1m, '5min')
-    atr5 = atr(df5, int(cfg['waves']['zigzag']['atr_window']))
+    # Build CUSUM event-time bars
+    cus = cfg['waves']['cusum']
+    atr200 = atr(df1m, int(cus['atr_window_1m']))
+    k_base = float(cus['k_factor'])
+    k_min = float(cus['k_min'])
+    k_max = float(cus['k_max'])
+    kappa = (atr200 * k_base).clip(lower=atr200 * k_min, upper=atr200 * k_max)
+    df_event = build_cusum_bars(df1m[['open','high','low','close','volume']], kappa)
+
     regime = TSMOMRegime(cfg, df1m)
-    waves = WaveGate(cfg)
+    waves = WaveGate(cfg, df_event, df1m)
 
     risk_cfg = RiskCfg(
         atr_window=int(cfg['risk']['atr']['window']),
         sl_mode=cfg['risk']['sl']['mode'],
         sl_atr_mult=float(cfg['risk']['sl']['atr_mult']),
-        be_trigger_r=float(cfg['risk']['be']['trigger_r_multiple']),
-        tsl_start_r=float(cfg['risk']['tsl']['start_r_multiple']),
+        be_trigger_r=float(cfg['risk']['be']['trigger_r']),
+        be_buffer_r_mult=float(cfg['risk']['be']['buffer']['r_multiple']),
+        be_fees_bps=float(cfg['risk']['be']['buffer']['fees_bps_round_trip']),
+        be_slip_bps=float(cfg['risk']['be']['buffer']['slippage_bps']),
+        tsl_start_r=float(cfg['risk']['tsl']['start_r']),
         tsl_atr_mult=float(cfg['risk']['tsl']['atr_mult'])
     )
 
@@ -41,6 +52,15 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     trade = None
     # Precompute ATR for speed
     atr_series = atr(df1m, risk_cfg.atr_window)
+
+    # log params
+    logs_dir = os.path.join(outputs_dir, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    with open(os.path.join(logs_dir, 'params_run.json'), 'w') as f:
+        json.dump({
+            'cusum_k_factor': k_base,
+            'event_bars': int(len(df_event))
+        }, f)
 
     iterator = range(warmup, len(df1m))
     stride = int(cfg['logging'].get('progress_stride', 50))
@@ -75,12 +95,13 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             continue
 
         # No open trade -> check gates and trigger
-        side = regime.decide_at(ts)
-        if side == FLAT:
+        reg = regime.compute_at(ts)
+        side = 'LONG' if reg['dir'] == 'BULL' else ('SHORT' if reg['dir'] == 'BEAR' else 'FLAT')
+        if side == 'FLAT':
             blockers['regime_flat'] += 1
             continue
 
-        wave_state = waves.compute_at(df5, atr5, ts)
+        wave_state = waves.compute_at(ts)
         if (not wave_state.get('armed')) or wave_state.get('dir') != side:
             blockers['wave_not_armed'] += 1
             continue
@@ -111,6 +132,9 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             'be_armed': False,
             'tsl_active': False,
             'be_price': float(entry),
+            'regime_score': float(reg['score']),
+            'regime_strength': float(reg['strength']),
+            'wave_frame': wave_state.get('frame', 'event'),
         }
 
     # if trade still open, close at last

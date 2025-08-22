@@ -11,17 +11,20 @@ class RiskCfg:
     sl_mode: str
     sl_atr_mult: float
     be_trigger_r: float
+    be_buffer_r_mult: float
+    be_fees_bps: float
+    be_slip_bps: float
     tsl_start_r: float
     tsl_atr_mult: float
 
 def initial_stop(entry_price: float, direction: str, wave_state: dict, df1m: pd.DataFrame, cfg: RiskCfg):
     a = atr(df1m, cfg.atr_window).iloc[-1]
     if direction == "LONG":
-        struct = float(wave_state['W2_low'])
+        struct = float(wave_state['w2_low'])
         atr_stop = entry_price - cfg.sl_atr_mult * a
         return max(struct, atr_stop)
     else:
-        struct = float(wave_state['W2_high'])
+        struct = float(wave_state['w2_high'])
         atr_stop = entry_price + cfg.sl_atr_mult * a
         return min(struct, atr_stop)
 
@@ -35,6 +38,8 @@ def _ensure_stop_mode(trade: dict):
         trade['tsl_active'] = False
     if 'be_price' not in trade:
         trade['be_price'] = trade.get('entry')
+    if 'be_floor' not in trade:
+        trade['be_floor'] = trade.get('stop')
 
 
 def update_stops(trade: dict, row, atr_last, cfg: RiskCfg):
@@ -53,15 +58,22 @@ def update_stops(trade: dict, row, atr_last, cfg: RiskCfg):
 
         # Arm BE once
         if trade['stop_mode'] == "INIT" and r >= cfg.be_trigger_r:
-            trade['stop'] = max(float(trade['stop']), entry)
+            buf_r = cfg.be_buffer_r_mult * r0
+            friction = entry * (cfg.be_fees_bps + cfg.be_slip_bps) / 10000.0
+            buffer = max(buf_r, friction)
+            stop_price = entry + buffer
+            trade['stop'] = max(float(trade['stop']), stop_price)
             trade['be_armed'] = True
             trade['stop_mode'] = "BE"
             trade['be_price'] = entry
+            trade['be_floor'] = trade['stop']
 
         # Activate / maintain TSL
         if r >= cfg.tsl_start_r:
             trailing = price - cfg.tsl_atr_mult * float(atr_last)
             new_stop = max(float(trade['stop']), trailing)
+            if trade.get('be_armed'):
+                new_stop = max(new_stop, float(trade.get('be_floor', trade['stop'])))
             if new_stop > float(trade['stop']):
                 trade['stop'] = new_stop
             trade['tsl_active'] = True
@@ -72,15 +84,22 @@ def update_stops(trade: dict, row, atr_last, cfg: RiskCfg):
 
         # Arm BE once
         if trade['stop_mode'] == "INIT" and r >= cfg.be_trigger_r:
-            trade['stop'] = min(float(trade['stop']), entry)
+            buf_r = cfg.be_buffer_r_mult * r0
+            friction = entry * (cfg.be_fees_bps + cfg.be_slip_bps) / 10000.0
+            buffer = max(buf_r, friction)
+            stop_price = entry - buffer
+            trade['stop'] = min(float(trade['stop']), stop_price)
             trade['be_armed'] = True
             trade['stop_mode'] = "BE"
             trade['be_price'] = entry
+            trade['be_floor'] = trade['stop']
 
         # Activate / maintain TSL
         if r >= cfg.tsl_start_r:
             trailing = price + cfg.tsl_atr_mult * float(atr_last)
             new_stop = min(float(trade['stop']), trailing)
+            if trade.get('be_armed'):
+                new_stop = min(new_stop, float(trade.get('be_floor', trade['stop'])))
             if new_stop < float(trade['stop']):
                 trade['stop'] = new_stop
             trade['tsl_active'] = True
