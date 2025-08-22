@@ -41,6 +41,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     trade = None
     # Precompute ATR for speed
     atr_series = atr(df1m, risk_cfg.atr_window)
+    atr_arr = atr_series.to_numpy()
 
     iterator = range(warmup, len(df1m))
     stride = int(cfg['logging'].get('progress_stride', 50))
@@ -59,7 +60,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
 
         # Manage open trade
         if trade is not None and not trade.get('exit'):
-            update_stops(trade, row, atr_series.iloc[i], risk_cfg)
+            update_stops(trade, row, atr_arr[i], cfg)
             check_exit(trade, row)
             if trade.get('exit'):
                 # R computation
@@ -107,6 +108,10 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             'reason': trig['reason'],
             'exit': None,
             'exit_reason': None,
+            'be_armed': False,
+            'tsl_active': False,
+            'r_peak': 0.0,
+            'tsl_lock_R_max': 0.0,
         }
 
     # if trade still open, close at last
@@ -128,21 +133,61 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
 
     summary = {}
     if not trades.empty:
+        exit_counts = trades['exit_reason'].value_counts().to_dict()
+        by_exit = trades.groupby('exit_reason')['r_realized'].agg(['count','sum'])
+        tsl = trades.loc[trades['exit_reason']=='TSL','r_realized']
+
+        sl_count = int(by_exit.loc['SL','count']) if 'SL' in by_exit.index else 0
+        be_count = int(by_exit.loc['BE','count']) if 'BE' in by_exit.index else 0
+        tsl_count = int(by_exit.loc['TSL','count']) if 'TSL' in by_exit.index else 0
+        sl_sum = float(by_exit.loc['SL','sum']) if 'SL' in by_exit.index else 0.0
+        tsl_sum = float(by_exit.loc['TSL','sum']) if 'TSL' in by_exit.index else 0.0
+
+        tsl_stats = {
+            "min": float(tsl.min()) if len(tsl) else 0.0,
+            "p25": float(tsl.quantile(0.25)) if len(tsl) else 0.0,
+            "median": float(tsl.median()) if len(tsl) else 0.0,
+            "p75": float(tsl.quantile(0.75)) if len(tsl) else 0.0,
+            "p90": float(tsl.quantile(0.90)) if len(tsl) else 0.0,
+            "max": float(tsl.max()) if len(tsl) else 0.0,
+            "count": tsl_count,
+            "sum_R": tsl_sum,
+        }
+
+        coverage = (tsl_sum / abs(sl_sum)) if sl_sum < 0 else None
+
         summary = {
-            'symbol': symbol,
-            'trades': len(trades),
-            'win_rate': float((trades['r_realized']>0).mean()),
-            'avg_R': float(trades['r_realized'].mean()),
-            'median_R': float(trades['r_realized'].median()),
-            'sum_R': float(trades['r_realized'].sum()),
-            'exits': trades['exit_reason'].value_counts().to_dict(),
-            'blockers': blockers
+            "symbol": symbol,
+            "trades": int(len(trades)),
+            "win_rate": float((trades['r_realized']>0).mean()),
+            "avg_R": float(trades['r_realized'].mean()),
+            "median_R": float(trades['r_realized'].median()),
+            "sum_R": float(trades['r_realized'].sum()),
+            "exits": exit_counts,
+            "sl_count": sl_count,
+            "be_count": be_count,
+            "tsl_count": tsl_count,
+            "tsl_stats": tsl_stats,
+            "tsl_coverage_ratio": coverage,
+            "blockers": blockers,
         }
     else:
-        summary = {'symbol': symbol, 'trades': 0, 'blockers': blockers}
+        summary = {"symbol": symbol, "trades": 0, "blockers": blockers}
 
-    with open(os.path.join(outputs_dir, f"{symbol}_summary.json"), 'w') as f:
+    with open(os.path.join(outputs_dir, f"{symbol}_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
+
+    # Clean one-liner per symbol
+    try:
+        cov_txt = "nan" if summary.get('tsl_coverage_ratio') is None else f"{summary['tsl_coverage_ratio']:.2f}"
+        print(
+            f"[{symbol}] trades={summary['trades']} | SL={summary.get('sl_count',0)} "
+            f"| BE={summary.get('be_count',0)} | TSL={summary.get('tsl_count',0)} "
+            f"| sumR={summary['sum_R']:.2f} | TSLcov={cov_txt} | "
+            f"TSLmed={summary.get('tsl_stats',{}).get('median',0):.2f}R"
+        )
+    except Exception:
+        pass
 
     return summary
 
