@@ -3,7 +3,6 @@ import os, json, yaml
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
 
 from .data import load_symbol_1m
 from .regime import TSMOMRegime, FLAT
@@ -12,6 +11,11 @@ from .trigger import momentum_ignition
 from .risk import RiskCfg, initial_stop, update_stops, check_exit
 
 from .utils import resample_ohlcv, atr_vec, zscore_logret_vec, body_dom_vec, true_range_vec
+
+
+def load_config(path: str) -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
 
 def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     inputs_dir = cfg['paths']['inputs_dir']
@@ -162,16 +166,14 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     return summary
 
 def run_all(config_path: str, progress_hook=None):
-    with open(config_path, 'r') as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(config_path)
     summaries = []
-    with ProcessPoolExecutor() as ex:
-        futures = {ex.submit(run_for_symbol, cfg, sym, progress_hook): sym for sym in cfg['symbols']}
-        for fut, sym in futures.items():
-            try:
-                summaries.append(fut.result())
-            except Exception as e:
-                summaries.append({'symbol': sym, 'error': str(e)})
+    for sym in cfg['symbols']:
+        try:
+            s = run_for_symbol(cfg, sym, progress_hook=progress_hook)
+        except Exception as e:
+            s = {'symbol': sym, 'error': str(e)}
+        summaries.append(s)
     with open(os.path.join(cfg['paths']['outputs_dir'], "combined_summary.json"), 'w') as f:
         json.dump(summaries, f, indent=2)
     print("Done. Summaries:", summaries)

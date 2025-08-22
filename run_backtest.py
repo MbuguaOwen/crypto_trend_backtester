@@ -1,71 +1,78 @@
-import argparse, warnings
-from collections import defaultdict
+import argparse
+import warnings
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
-from src.engine.backtest import run_all
+
+from src.engine.backtest import run_for_symbol, load_config
 
 
-def main():
+def _run_symbol(args):
+    cfg, symbol = args
+    return run_for_symbol(cfg, symbol, progress_hook=None)
+
+
+def main() -> None:
     ap = argparse.ArgumentParser(description="WaveGate Momentum Backtester")
     ap.add_argument("--config", required=True, help="Path to YAML config")
     ap.add_argument("--no-progress", action="store_true", help="Disable progress bars")
-    ap.add_argument("--suppress-warnings", action="store_true", help="Hide warnings for clean bars")
+    ap.add_argument(
+        "--parallel",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Use process pool across symbols (auto: on when no-progress)",
+    )
+    ap.add_argument(
+        "--suppress-warnings", action="store_true", help="Hide warnings for clean bars"
+    )
     args = ap.parse_args()
 
     if args.suppress_warnings:
         warnings.filterwarnings("ignore", category=FutureWarning)
 
-    bars = {}
-    overall = None
-    per_done = defaultdict(int)
+    cfg = load_config(args.config)
+    symbols = cfg["symbols"]
 
-    def hook(symbol, done, total):
-        if args.no_progress:
-            return
-        key = symbol.upper()
-        if key not in bars:
-            bars[key] = tqdm(total=total, desc=f"{key} bars", position=len(bars), ncols=100,
-                             mininterval=0.2, smoothing=0.1, leave=True, dynamic_ncols=True)
-        # Per-symbol update
-        done = max(0, min(done, bars[key].total))
-        delta = done - bars[key].n
-        if delta > 0:
-            bars[key].update(delta)
-            per_done[key] = bars[key].n
-        # Overall bar
-        show_overall = True
-        try:
-            # prefer YAML flag if available (safe default true)
-            from yaml import safe_load
-        except Exception:
-            pass
-        if overall is None:
-            total_all = sum(b.total for b in bars.values())
-            if total_all > 0:
-                overall_desc = "ALL bars"
-                overall_position = len(bars) + 1
-                overall = tqdm(total=total_all, desc=overall_desc, position=overall_position,
-                               mininterval=0.2, smoothing=0.1, leave=True, dynamic_ncols=True)
-        if overall is not None:
-            # recompute aggregate delta robustly
-            agg_done = sum(b.n for b in bars.values())
-            delta_overall = agg_done - overall.n
-            if delta_overall > 0:
-                overall.update(delta_overall)
+    use_progress = not args.no_progress
+    want_parallel = args.parallel in ("on", "auto") and not use_progress
 
-    run_all(args.config, progress_hook=None if args.no_progress else hook)
+    if want_parallel:
+        summaries = []
+        pbar = tqdm(total=len(symbols), desc="Symbols")
+        with ProcessPoolExecutor(
+            max_workers=min(os.cpu_count() or 2, len(symbols))
+        ) as ex:
+            futures = {ex.submit(_run_symbol, (cfg, sym)): sym for sym in symbols}
+            for fut in as_completed(futures):
+                summaries.append(fut.result())
+                pbar.update(1)
+        pbar.close()
+    else:
+        summaries = []
+        overall = tqdm(total=len(symbols), desc="Symbols", disable=not use_progress)
+        for sym in symbols:
+            bar = None
 
-    # Close bars
-    for tb in bars.values():
-        try:
-            tb.close()
-        except Exception:
-            pass
-    if overall is not None:
-        try:
-            overall.close()
-        except Exception:
-            pass
+            def hook(symbol: str, done: int, total: int) -> None:
+                nonlocal bar
+                if bar is None:
+                    bar = tqdm(total=total, desc=f"{symbol} bars", leave=True)
+                delta = done - bar.n
+                if delta > 0:
+                    bar.update(delta)
+
+            res = run_for_symbol(cfg, sym, progress_hook=hook if use_progress else None)
+            summaries.append(res)
+            if bar is not None:
+                bar.close()
+            overall.update(1)
+        overall.close()
+
+    outdir = cfg["paths"]["outputs_dir"]
+    os.makedirs(outdir, exist_ok=True)
+    print("Done. Summaries:", summaries)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
+
