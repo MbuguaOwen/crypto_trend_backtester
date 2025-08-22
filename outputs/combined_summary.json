@@ -1,14 +1,140 @@
-[
-  {
+{
+  "BTCUSDT": {
     "symbol": "BTCUSDT",
-    "error": "time data \"2025-07-01 00:02:04+00:00\" doesn't match format \"%Y-%m-%d %H:%M:%S.%f%z\", at position 598. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+    "trades": 0,
+    "sum_R": 0.0,
+    "exits": {},
+    "error": "Insufficient 1m bars after loading.",
+    "bars_loaded": 0,
+    "warmup_required": 1000,
+    "file_diagnostics": {
+      "2025-01": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-02": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-03": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-04": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-05": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-06": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-07": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      }
+    }
   },
-  {
+  "ETHUSDT": {
     "symbol": "ETHUSDT",
-    "error": "DatetimeIndex.get_loc() got an unexpected keyword argument 'method'"
+    "trades": 0,
+    "sum_R": 0.0,
+    "exits": {},
+    "error": "Insufficient 1m bars after loading.",
+    "bars_loaded": 0,
+    "warmup_required": 1000,
+    "file_diagnostics": {
+      "2025-01": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-02": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-03": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-04": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-05": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-06": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-07": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      }
+    }
   },
-  {
+  "SOLUSDT": {
     "symbol": "SOLUSDT",
-    "error": "time data \"2025-07-01 00:02:15+00:00\" doesn't match format \"%Y-%m-%d %H:%M:%S.%f%z\", at position 470. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+    "trades": 0,
+    "sum_R": 0.0,
+    "exits": {},
+    "error": "Insufficient 1m bars after loading.",
+    "bars_loaded": 0,
+    "warmup_required": 1000,
+    "file_diagnostics": {
+      "2025-01": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-02": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-03": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-04": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-05": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-06": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      },
+      "2025-07": {
+        "file": null,
+        "ticks": 0,
+        "bars_1m": 0
+      }
+    }
   }
-]
+}
