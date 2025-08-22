@@ -52,6 +52,10 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     trade = None
     # Precompute ATR for speed
     atr_series = atr(df1m, risk_cfg.atr_window)
+    # regime tracking statistics
+    reg_counts = {"BULL": 0, "BEAR": 0, "FLAT": 0}
+    reg_scores = []
+    reg_strengths = []
 
     # log params
     logs_dir = os.path.join(outputs_dir, 'logs')
@@ -77,7 +81,13 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             except Exception:
                 pass
 
-        # Manage open trade
+        # compute regime for this bar (causal)
+        reg = regime.compute_at(ts)
+        reg_counts[reg['dir']] += 1
+        reg_scores.append(reg['score'])
+        reg_strengths.append(reg['strength'])
+
+        # Manage open trade first
         if trade is not None and not trade.get('exit'):
             update_stops(trade, row, atr_series.iloc[i], risk_cfg)
             check_exit(trade, row)
@@ -95,7 +105,6 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             continue
 
         # No open trade -> check gates and trigger
-        reg = regime.compute_at(ts)
         side = 'LONG' if reg['dir'] == 'BULL' else ('SHORT' if reg['dir'] == 'BEAR' else 'FLAT')
         if side == 'FLAT':
             blockers['regime_flat'] += 1
@@ -132,6 +141,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             'be_armed': False,
             'tsl_active': False,
             'be_price': float(entry),
+            'regime_dir': reg['dir'],
             'regime_score': float(reg['score']),
             'regime_strength': float(reg['strength']),
             'wave_frame': wave_state.get('frame', 'event'),
@@ -164,10 +174,18 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             'median_R': float(trades['r_realized'].median()),
             'sum_R': float(trades['r_realized'].sum()),
             'exits': trades['exit_reason'].value_counts().to_dict(),
-            'blockers': blockers
+            'blockers': blockers,
         }
     else:
         summary = {'symbol': symbol, 'trades': 0, 'blockers': blockers}
+
+    summary.update({
+        'regime_bull_bars': reg_counts['BULL'],
+        'regime_bear_bars': reg_counts['BEAR'],
+        'regime_flat_bars': reg_counts['FLAT'],
+        'regime_score_median': float(np.median(reg_scores)) if reg_scores else 0.0,
+        'regime_strength_median': float(np.median(reg_strengths)) if reg_strengths else 0.0,
+    })
 
     with open(os.path.join(outputs_dir, f"{symbol}_summary.json"), 'w') as f:
         json.dump(summary, f, indent=2)
