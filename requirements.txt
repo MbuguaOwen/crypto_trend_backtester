@@ -2,3 +2,8 @@ numpy
 pandas>=2.0.0
 pyyaml
 tqdm
+numba
+pyarrow
+fastparquet
+zstandard
+

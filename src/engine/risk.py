@@ -10,6 +10,7 @@ class RiskManager:
         self.ac = ac
 
         self.atr_risk = atr(df1m, int(cfg['risk']['atr']['window'])).reindex(df1m.index).ffill()
+        self._atr_vals = self.atr_risk.to_numpy(dtype='float64')
 
         buf = cfg['risk']['be']['buffer']
         self.be_r_mult = float(buf['r_multiple'])
@@ -72,7 +73,7 @@ class RiskManager:
                 trade['be_floor'] = trade['stop']
 
             if r >= tsl_start_r:
-                trailing = price - tsl_atr_mult * float(self.atr_risk.iloc[i_bar])
+                trailing = price - tsl_atr_mult * self._atr_vals[i_bar]
                 new_stop = max(float(trade['stop']), trailing)
                 if trade.get('be_armed'):
                     new_stop = max(new_stop, float(trade.get('be_floor', trade['stop'])))
@@ -94,7 +95,7 @@ class RiskManager:
                 trade['be_floor'] = trade['stop']
 
             if r >= tsl_start_r:
-                trailing = price + tsl_atr_mult * float(self.atr_risk.iloc[i_bar])
+                trailing = price + tsl_atr_mult * self._atr_vals[i_bar]
                 new_stop = min(float(trade['stop']), trailing)
                 if trade.get('be_armed'):
                     new_stop = min(new_stop, float(trade.get('be_floor', trade['stop'])))

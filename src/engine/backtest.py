@@ -24,6 +24,11 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
         raise RuntimeError('No 1m data loaded')
 
     atr1m200 = atr_1m_fn(df1m, int(cfg['waves']['cusum']['atr_window_1m'])).reindex(df1m.index).ffill()
+    c_open  = df1m['open'].to_numpy('float64')
+    c_high  = df1m['high'].to_numpy('float64')
+    c_low   = df1m['low'].to_numpy('float64')
+    c_close = df1m['close'].to_numpy('float64')
+    atr_arr = atr1m200.to_numpy('float64')
 
     k = (atr1m200 * float(cfg['waves']['cusum']['k_factor'])).clip(
         lower=atr1m200 * float(cfg['waves']['cusum']['k_min']),
@@ -34,6 +39,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     ac = AdaptiveController(cfg, atr1m=atr1m200)
 
     regime = TSMOMRegime(cfg, df1m)
+    regime_dir = regime.precompute_on_1m(df1m.index)  # int8 array
     waves = WaveGate(cfg, df_event, df1m, ac)
     trigger = Trigger(cfg, df1m, atr1m200, ac)
     risk = RiskManager(cfg, df1m, atr1m200, ac)
@@ -66,10 +72,12 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             except Exception:
                 pass
         ts = df1m.index[i]
+        price = c_close[i]
+        row_view = {'open': c_open[i], 'high': c_high[i], 'low': c_low[i], 'close': price}
 
         if trade is not None and not trade.get('exit'):
-            risk.update_trade(trade, df1m.iloc[i], i)
-            risk.check_exit(trade, df1m.iloc[i])
+            risk.update_trade(trade, row_view, i)
+            risk.check_exit(trade, row_view)
             if trade.get('exit'):
                 r0 = trade['r0']
                 if trade['direction'] == 'LONG':
@@ -81,11 +89,11 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
                 trade = None
             continue
 
-        reg = regime.compute_at(ts)
-        if reg['dir'] not in ('BULL', 'BEAR'):
+        rd = regime_dir[i]
+        if rd == 0:
             blockers['regime_flat'] += 1
             continue
-
+        direction = 'LONG' if rd > 0 else 'SHORT'
         wv = waves.compute_at(ts, i)
         if not wv.get('armed', False):
             blockers['wave_not_armed'] += 1
@@ -97,15 +105,13 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             continue
 
         zret = tchk.get('zret', 0.0)
-        if reg['dir'] == 'BULL' and zret < tchk['z_k']:
+        if rd > 0 and zret < tchk['z_k']:
             blockers['trigger_fail'] += 1
             continue
-        if reg['dir'] == 'BEAR' and zret > -tchk['z_k']:
+        if rd < 0 and zret > -tchk['z_k']:
             blockers['trigger_fail'] += 1
             continue
-
-        direction = 'LONG' if reg['dir'] == 'BULL' else 'SHORT'
-        entry = df1m['close'].iloc[i]
+        entry = price
         stop0 = risk.initial_stop(entry, direction, wv, i)
         r0 = entry - stop0 if direction == 'LONG' else stop0 - entry
         r0 = max(1e-9, r0)
@@ -133,8 +139,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
         }
 
     if trade is not None and not trade.get('exit'):
-        last = df1m.iloc[-1]
-        trade['exit'] = float(last['close'])
+        trade['exit'] = float(c_close[-1])
         trade['exit_reason'] = 'EOD'
         if trade['direction'] == 'LONG':
             r_realized = (trade['exit'] - trade['entry']) / max(1e-9, trade['r0'])
