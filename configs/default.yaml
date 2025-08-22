@@ -10,57 +10,62 @@ warmup:
   min_1m_bars: 1000  # ensure indicators populated
 
 regime:
-  timeframes:
-    "1m":  { lookback_closes: 30 }
-    "5m":  { lookback_closes: 20 }
-    "15m": { lookback_closes: 12 }
-    "1h":  { lookback_closes: 8 }
-  vote:
-    require: 3
+  ts_mom:
+    require_majority: 4          # 4 of 5
+    timeframes:
+      - tf: "1min"   # 1-minute
+        lookback_closes: 3
+      - tf: "5min"
+        lookback_closes: 3
+      - tf: "15min"
+        lookback_closes: 3
+      - tf: "1h"
+        lookback_closes: 3
+      - tf: "5h"     # NEW timeframe
+        lookback_closes: 3
 
 waves:
   enabled: true
+  timeframe: "event"             # "event" uses CUSUM bars
+  cusum:
+    k_factor: 0.45               # κ = k_factor * ATR_1m(200)
+    k_min: 0.35
+    k_max: 0.70
+    atr_window_1m: 200
   zigzag:
-    atr_window: 30
-    atr_mults: [0.7, 1.4, 3.0]
-    max_lookback_bars: 2500
+    atr_window: 220
+    atr_mults: [1.8, 3.0, 5.0]
+    max_lookback_bars: 2000      # count of event bars (enough; 2k events)
   thresholds:
-    min_confidence: 0.55
-    w2_posterior_min: 0.55
+    min_confidence: 0.60
+    w2_posterior_min: 0.60
     w2_end_arm: 0.62
-    block_if_correction_p: 0.60
-    max_age_impulse_bars: 20
-
-entry_gate:
-  mode: "W2_to_W3_only"
-  confirmations:
-    micro_msb: true
-    min_body_dom: 0.55
-    donchian_breakout: { enabled: true, lookback: 20 }
-  buffers:
-    breakout_atr_mult: 0.20
+    max_age_impulse_bars: 110    # in event bars; additionally enforce ≥5h 1m coverage
 
 entry:
-  mode: "wavegate_momentum"
+  mode: "baseline"
   momentum:
-    zscore_window: 30
-    zscore_k: 2.5
-    min_body_dom: 0.55
-    range_atr_min: 3.0
-  breakout:
-    buffer_atr_mult: 0.20
+    zscore_window: 20
+    zscore_k: 2.0
+    min_body_dom: 0.6
+    range_atr_min: 1.5
+    buffer_atr_mult: 0.30
 
 risk:
   atr:
-    window: 30
+    window: 14
   sl:
-    mode: "atr"
-    atr_mult: 15.0
+    mode: "structure_or_atr"
+    atr_mult: 5.0
   be:
-    trigger_r_multiple: 0.5
+    trigger_r: 0.75
+    buffer:
+      r_multiple: 0.02           # small > 0R to cover friction
+      fees_bps_round_trip: 7
+      slippage_bps: 5
   tsl:
-    start_r_multiple: 4.0
-    atr_mult: 7.0
+    start_r: 1.4
+    atr_mult: 3.6
 
 position:
   qty_mode: "notional"  # "units" or "notional"
@@ -69,6 +74,5 @@ position:
 logging:
   progress: true
   debug_blockers: true
-  # throttle UI updates to keep bars smooth & fast
   progress_stride: 50     # update hook every N bars
   overall_bar: true       # show combined progress bar across symbols
