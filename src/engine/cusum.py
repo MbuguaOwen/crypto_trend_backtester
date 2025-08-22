@@ -2,47 +2,51 @@ import numpy as np
 import pandas as pd
 
 
-def build_cusum_bars(df1m: pd.DataFrame, kappa_series: pd.Series) -> pd.DataFrame:
+def build_cusum_bars(df1m: pd.DataFrame, kappa: pd.Series) -> pd.DataFrame:
     """
-    Build event-time OHLCV using CUSUM on close-to-close Δ.
-    - df1m: index tz-aware, 1m OHLCV with columns ['open','high','low','close','volume'].
-    - kappa_series: pd.Series aligned to df1m.index with per-bar κ (>=0).
-    Returns: df_event with same columns, index at the *end time* of each event bar.
-    Causal: only completes a bar when |cumΔ| >= κ, then resets from that bar.
+    Build event-time OHLCV bars from 1m OHLCV via CUSUM on close-to-close deltas.
+    κ (kappa) must be a Series aligned to df1m.index (tz-aware UTC).
+    Emits bars with index = event end timestamps (tz-aware UTC).
+    Causal: only completes a bar when |cumΔ| >= κ at that bar, then resets.
     """
-    assert df1m.index.equals(kappa_series.index)
-    o, h, l, v = None, None, None, 0.0
-    cum = 0.0
-    last_close = None
+    assert df1m.index.equals(kappa.index), "kappa must align to df1m index"
+
     rows = []
+    open_, high_, low_, vol_ = None, None, None, 0.0
+    last_close = None
+    cum = 0.0
+
     for ts, row in df1m.iterrows():
-        c = float(row['close'])
+        close = float(row['close'])
         if last_close is None:
-            last_close = c
-            o = float(row['open'])
-            h = float(row['high'])
-            l = float(row['low'])
-            v = float(row['volume'])
+            last_close = close
+            open_ = float(row['open']); high_ = float(row['high'])
+            low_ = float(row['low']);  vol_  = float(row['volume'])
             continue
-        delta = c - last_close
-        last_close = c
 
-        h = max(h, float(row['high']))
-        l = min(l, float(row['low']))
-        v += float(row['volume'])
+        delta = close - last_close
+        last_close = close
 
-        cum += delta
-        k = float(kappa_series.loc[ts])
+        # roll OHLCV for the current (open) segment
+        high_ = max(high_, float(row['high']))
+        low_  = min(low_,  float(row['low']))
+        vol_ += float(row['volume'])
+
+        k = float(kappa.loc[ts])
         if k <= 0:
             continue
 
+        cum += delta
         if abs(cum) >= k:
-            rows.append((ts, o, h, l, c, v))
-            o, h, l, v = c, c, c, 0.0
+            # complete an event bar at this timestamp
+            rows.append((ts, open_, high_, low_, close, vol_))
+            # reset segment (starting next bar)
+            open_, high_, low_, vol_ = close, close, close, 0.0
             cum = 0.0
 
     if not rows:
-        return pd.DataFrame(columns=['open','high','low','close','volume'], index=pd.DatetimeIndex([], tz=df1m.index.tz))
+        return pd.DataFrame(columns=['open','high','low','close','volume'],
+                            index=pd.DatetimeIndex([], tz=df1m.index.tz))
     out = pd.DataFrame(rows, columns=['ts','open','high','low','close','volume']).set_index('ts')
-    out.index = pd.DatetimeIndex(out.index, tz=df1m.index.tz)
+    out.index = pd.DatetimeIndex(out.index, tz=df1m.index.tz)  # ensure tz-aware
     return out

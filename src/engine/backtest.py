@@ -11,7 +11,7 @@ from .waves import WaveGate
 from .trigger import momentum_ignition
 from .risk import RiskCfg, initial_stop, update_stops, check_exit
 
-from .utils import atr
+from .utils import atr as atr_1m
 
 def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     inputs_dir = cfg['paths']['inputs_dir']
@@ -23,18 +23,17 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     df1m = load_symbol_1m(inputs_dir, symbol, months, progress=cfg['logging']['progress'])
     if len(df1m) < warmup + 500:
         raise RuntimeError("Insufficient 1m bars after loading.")
-    # Precompute resampled frames once (no look-ahead; we slice by ts in-loop)
-    # Build CUSUM event-time bars
-    cus = cfg['waves']['cusum']
-    atr200 = atr(df1m, int(cus['atr_window_1m']))
-    k_base = float(cus['k_factor'])
-    k_min = float(cus['k_min'])
-    k_max = float(cus['k_max'])
-    kappa = (atr200 * k_base).clip(lower=atr200 * k_min, upper=atr200 * k_max)
+
+    wcfg = cfg['waves']
+    atr200 = atr_1m(df1m, int(wcfg['cusum']['atr_window_1m']))
+    k_base = float(wcfg['cusum']['k_factor'])
+    k_min  = float(wcfg['cusum']['k_min'])
+    k_max  = float(wcfg['cusum']['k_max'])
+    kappa  = (atr200 * k_base).clip(lower=atr200 * k_min, upper=atr200 * k_max).reindex(df1m.index).fillna(method='pad')
     df_event = build_cusum_bars(df1m[['open','high','low','close','volume']], kappa)
 
     regime = TSMOMRegime(cfg, df1m)
-    waves = WaveGate(cfg, df_event, df1m)
+    waves  = WaveGate(cfg, df_event, df1m)
 
     risk_cfg = RiskCfg(
         atr_window=int(cfg['risk']['atr']['window']),
@@ -51,16 +50,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     rows = []
     trade = None
     # Precompute ATR for speed
-    atr_series = atr(df1m, risk_cfg.atr_window)
-
-    # log params
-    logs_dir = os.path.join(outputs_dir, 'logs')
-    os.makedirs(logs_dir, exist_ok=True)
-    with open(os.path.join(logs_dir, 'params_run.json'), 'w') as f:
-        json.dump({
-            'cusum_k_factor': k_base,
-            'event_bars': int(len(df_event))
-        }, f)
+    atr_series = atr_1m(df1m, risk_cfg.atr_window)
 
     iterator = range(warmup, len(df1m))
     stride = int(cfg['logging'].get('progress_stride', 50))
@@ -101,21 +91,21 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             blockers['regime_flat'] += 1
             continue
 
-        wave_state = waves.compute_at(ts)
-        if (not wave_state.get('armed')) or wave_state.get('dir') != side:
+        wv = waves.compute_at(ts)
+        if (not wv.get('armed')) or wv.get('dir') != side:
             blockers['wave_not_armed'] += 1
             continue
 
         # Use df1m up-to-ts for trigger calcs (causal)
         window = df1m.iloc[:i+1]
-        trig = momentum_ignition(window, wave_state, side, cfg)
+        trig = momentum_ignition(window, wv, side, cfg)
         if not trig:
             blockers['trigger_fail'] += 1
             continue
 
         # Open trade at close
         entry = row['close']
-        stop0 = initial_stop(entry, trig['direction'], wave_state, window, risk_cfg)
+        stop0 = initial_stop(entry, trig['direction'], wv, window, risk_cfg)
         r0 = entry - stop0 if trig['direction']=='LONG' else stop0 - entry
         r0 = max(1e-9, r0)
         trade = {
@@ -132,9 +122,9 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             'be_armed': False,
             'tsl_active': False,
             'be_price': float(entry),
-            'regime_score': float(reg['score']),
-            'regime_strength': float(reg['strength']),
-            'wave_frame': wave_state.get('frame', 'event'),
+            'regime_score': float(reg.get('score', 0.0)),
+            'regime_strength': float(reg.get('strength', 0.0)),
+            'wave_frame': wv.get('frame', 'event'),
         }
 
     # if trade still open, close at last
@@ -171,6 +161,20 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
 
     with open(os.path.join(outputs_dir, f"{symbol}_summary.json"), 'w') as f:
         json.dump(summary, f, indent=2)
+
+    params = {
+        "cusum": {
+            "k_factor": k_base,
+            "k_min": k_min,
+            "k_max": k_max,
+            "atr_window_1m": int(wcfg['cusum']['atr_window_1m']),
+            "event_bars": int(len(df_event))
+        }
+    }
+    logs_dir = os.path.join(outputs_dir, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    with open(os.path.join(logs_dir, f"{symbol}_params_run.json"), 'w') as f:
+        json.dump(params, f, indent=2)
 
     return summary
 
