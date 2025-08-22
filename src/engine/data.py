@@ -15,40 +15,48 @@ def _pick_ts_column(df: pd.DataFrame) -> str:
 def _parse_ts(s: pd.Series) -> pd.DatetimeIndex:
     """
     Robustly parse tick timestamps that may be:
-      - epoch milliseconds (int or numeric string)
-      - epoch seconds (fallback)
-      - ISO8601 strings with timezone (e.g., '2025-07-01 00:00:00.049000+00:00')
+      - epoch milliseconds (int or numeric string, 13 digits)
+      - epoch seconds (numeric)
+      - ISO8601 strings with timezone (e.g., '2025-07-01 00:02:04+00:00' or '...Z')
     Returns tz-aware UTC DatetimeIndex, or raises a helpful error.
     """
-    # If already numeric → determine ms vs seconds via magnitude
+    # Numeric fast-path (epoch ms vs s by magnitude)
     if np.issubdtype(s.dtype, np.number):
-        s_int = s.astype('int64')
-        unit = 's' if (s_int < 1e12).all() else 'ms'
+        s_int = s.astype("int64")
+        unit = "s" if (s_int < 1_000_000_000_000).all() else "ms"
         return pd.to_datetime(s_int, unit=unit, utc=True)
 
-    s_str = s.astype(str)
+    # Normalize strings
+    s_str = s.astype(str).str.strip()
+    # Normalize Z → +00:00 for consistency
+    s_str = s_str.str.replace("Z", "+00:00", regex=False)
+    # Treat empties / nans as invalid
+    s_norm = s_str.replace({"": pd.NA, "nan": pd.NA, "NaN": pd.NA})
 
-    # All 13 digits? → epoch ms
-    if s_str.str.match(r"^\d{13}$").all():
-        return pd.to_datetime(s_str.astype('int64'), unit='ms', utc=True)
+    # 13-digit only? → epoch ms
+    is_13 = s_norm.fillna("").str.match(r"^\d{13}$")
+    if is_13.all():
+        return pd.to_datetime(s_norm.astype("int64"), unit="ms", utc=True)
 
-    # Try general ISO8601 first
-    dt = pd.to_datetime(s_str, utc=True, errors='coerce')
+    # Try strict ISO8601 first (fast path)
+    dt = pd.to_datetime(s_norm, utc=True, errors="coerce", format="ISO8601")
 
-    # If some failed, try epoch seconds as fallback for numeric-like strings
+    # If some failed, try epoch seconds fallback for numeric-like strings
     if dt.isna().any():
-        num = pd.to_numeric(s_str, errors='coerce')
-        dt_sec = pd.to_datetime(num, unit='s', utc=True, errors='coerce')
+        num = pd.to_numeric(s_norm, errors="coerce")
+        dt_sec = pd.to_datetime(num, unit="s", utc=True, errors="coerce")
+        # Prefer whichever parsed more rows
         if dt_sec.notna().sum() > dt.notna().sum():
             dt = dt_sec
 
-    # If still failing, raise a focused error with a sample bad value
+    # Still failing? show a few problematic samples
     if dt.isna().any():
-        bad = s_str[dt.isna()].iloc[0]
+        bad_samples = s_str[dt.isna()].drop_duplicates().head(5).tolist()
         raise ValueError(
-            f"Unparseable timestamp sample: {bad!r}. "
-            "Expected epoch ms/seconds or ISO8601 with timezone "
-            "(e.g., '2025-07-01 00:00:00.049000+00:00')."
+            "Unparseable timestamp values (first few): "
+            + "; ".join(repr(x) for x in bad_samples)
+            + ". Expected epoch ms/seconds or ISO8601 with timezone "
+              "(e.g., '2025-07-01 00:00:00.049000+00:00', '...+00:00', or '...Z')."
         )
 
     return pd.DatetimeIndex(dt)
