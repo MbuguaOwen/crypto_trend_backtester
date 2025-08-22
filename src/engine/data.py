@@ -1,9 +1,9 @@
-
 import os
 import pandas as pd
 import numpy as np
 from .utils import ensure_datetime_utc
 from tqdm import tqdm
+
 
 def _infer_timestamp_col(cols):
     for c in cols:
@@ -12,12 +12,14 @@ def _infer_timestamp_col(cols):
             return c
     raise ValueError("No timestamp-like column found. Expected one of: timestamp, ts, time, datetime.")
 
+
 def _infer_price_col(cols):
     for c in cols:
         lc = c.lower()
         if lc in ('price','p','last','close'):
             return c
     raise ValueError("No price-like column found. Expected one of: price, p, last, close.")
+
 
 def _infer_qty_col(cols):
     for c in cols:
@@ -26,6 +28,7 @@ def _infer_qty_col(cols):
             return c
     # volume not strictly required; use 1
     return None
+
 
 def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -71,7 +74,22 @@ def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
     out.index.name = 'timestamp'
     return out
 
+
 def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
+    """Load 1-minute bars with optional Parquet caching."""
+    cache_path = os.path.join(inputs_dir, f"{symbol}_1m.parquet")
+    csv_paths = []
+    for m in months:
+        fn = f"{symbol}/{symbol}-ticks-{m}.csv"
+        path = os.path.join(inputs_dir, fn)
+        if os.path.exists(path):
+            csv_paths.append(path)
+    if csv_paths and os.path.exists(cache_path):
+        cache_mtime = os.path.getmtime(cache_path)
+        newest_csv = max(os.path.getmtime(p) for p in csv_paths)
+        if cache_mtime >= newest_csv:
+            return pd.read_parquet(cache_path)
+
     frames = []
     iterator = months
     bar = None
@@ -95,6 +113,9 @@ def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
     if not frames:
         raise FileNotFoundError(f"No monthly files found for {symbol}. Looked for months={months}.")
     df = pd.concat(frames).sort_index()
-    # dedup minutes if any overlap
     df = df[~df.index.duplicated(keep='last')]
+    try:
+        df.to_parquet(cache_path)
+    except Exception:
+        pass
     return df
