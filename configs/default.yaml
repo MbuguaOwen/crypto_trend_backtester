@@ -21,8 +21,8 @@ regime:
 waves:
   enabled: true
   zigzag:
-    atr_window: 40
-    atr_mults: [1.0, 2.0, 3.5]
+    atr_window: 30
+    atr_mults: [0.7, 1.4, 3.0]
     max_lookback_bars: 2500
   thresholds:
     min_confidence: 0.55
@@ -43,24 +43,24 @@ entry_gate:
 entry:
   mode: "wavegate_momentum"
   momentum:
-    zscore_window: 20
-    zscore_k: 1.3
+    zscore_window: 30
+    zscore_k: 2.5
     min_body_dom: 0.55
-    range_atr_min: 1.5
+    range_atr_min: 3.0
   breakout:
     buffer_atr_mult: 0.20
 
 risk:
   atr:
-    window: 14
+    window: 30
   sl:
-    mode: "structure_or_atr"
+    mode: "atr"
     atr_mult: 15.0
   be:
     trigger_r_multiple: 0.5
   tsl:
     start_r_multiple: 4.0
-    atr_mult: 15.0
+    atr_mult: 7.0
 
 position:
   qty_mode: "notional"  # "units" or "notional"
