@@ -1,6 +1,6 @@
 
 # Minimal, non-duplicated config with strict adaptive defaults.
-symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+symbols: ["BTCUSDT"]   #, "ETHUSDT", "SOLUSDT"
 
 paths:
   inputs_dir: "inputs"
