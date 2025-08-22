@@ -1,174 +1,166 @@
-
-import os, json, math, yaml
+import os
+import json
+import yaml
 import pandas as pd
-import numpy as np
-from tqdm import tqdm
 
 from .data import load_symbol_1m
+from .utils import atr as atr_1m_fn
 from .cusum import build_cusum_bars
-from .regime import TSMOMRegime
+from .adaptive import AdaptiveController
 from .waves import WaveGate
-from .trigger import momentum_ignition
-from .risk import RiskCfg, initial_stop, update_stops, check_exit
+from .trigger import Trigger
+from .risk import RiskManager
+from .regime import TSMOMRegime
 
-from .utils import atr as atr_1m
 
 def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     inputs_dir = cfg['paths']['inputs_dir']
     outputs_dir = cfg['paths']['outputs_dir']
     months = cfg['months']
-    warmup = int(cfg['warmup']['min_1m_bars'])
     os.makedirs(outputs_dir, exist_ok=True)
 
     df1m = load_symbol_1m(inputs_dir, symbol, months, progress=cfg['logging']['progress'])
-    if len(df1m) < warmup + 500:
-        raise RuntimeError("Insufficient 1m bars after loading.")
+    if df1m.empty:
+        raise RuntimeError('No 1m data loaded')
 
-    wcfg = cfg['waves']
-    atr200 = atr_1m(df1m, int(wcfg['cusum']['atr_window_1m']))
-    k_base = float(wcfg['cusum']['k_factor'])
-    k_min  = float(wcfg['cusum']['k_min'])
-    k_max  = float(wcfg['cusum']['k_max'])
-    kappa  = (atr200 * k_base).clip(lower=atr200 * k_min, upper=atr200 * k_max).reindex(df1m.index).fillna(method='pad')
-    df_event = build_cusum_bars(df1m[['open','high','low','close','volume']], kappa)
+    atr1m200 = atr_1m_fn(df1m, int(cfg['waves']['cusum']['atr_window_1m'])).reindex(df1m.index).ffill()
+
+    k = (atr1m200 * float(cfg['waves']['cusum']['k_factor'])).clip(
+        lower=atr1m200 * float(cfg['waves']['cusum']['k_min']),
+        upper=atr1m200 * float(cfg['waves']['cusum']['k_max'])
+    )
+    df_event = build_cusum_bars(df1m[['open', 'high', 'low', 'close', 'volume']], k)
+
+    ac = AdaptiveController(cfg, atr1m=atr1m200)
 
     regime = TSMOMRegime(cfg, df1m)
-    waves  = WaveGate(cfg, df_event, df1m)
+    waves = WaveGate(cfg, df_event, df1m, ac)
+    trigger = Trigger(cfg, df1m, atr1m200, ac)
+    risk = RiskManager(cfg, df1m, atr1m200, ac)
 
-    risk_cfg = RiskCfg(
-        atr_window=int(cfg['risk']['atr']['window']),
-        sl_mode=cfg['risk']['sl']['mode'],
-        sl_atr_mult=float(cfg['risk']['sl']['atr_mult']),
-        be_trigger_r=float(cfg['risk']['be']['trigger_r']),
-        be_buffer_r_mult=float(cfg['risk']['be']['buffer']['r_multiple']),
-        be_fees_bps=float(cfg['risk']['be']['buffer']['fees_bps_round_trip']),
-        be_slip_bps=float(cfg['risk']['be']['buffer']['slippage_bps']),
-        tsl_start_r=float(cfg['risk']['tsl']['start_r']),
-        tsl_atr_mult=float(cfg['risk']['tsl']['atr_mult'])
-    )
+    wm = int(cfg['engine']['warmup']['min_1m_bars'])
+    wc = int(cfg['engine']['warmup']['min_w2_candidates'])
 
-    rows = []
+    i_warm = wm
+    ts_warm = df1m.index[min(i_warm, len(df1m) - 1)]
+    seen = waves.prewarm_until(ts_warm)
+    while seen < wc and i_warm < len(df1m) - 1:
+        i_warm = min(len(df1m) - 1, i_warm + wm // 5)
+        ts_warm = df1m.index[i_warm]
+        seen += waves.prewarm_until(ts_warm)
+
+    start_i = max(wm, i_warm)
+    assert ac.ready(start_i, seen), "Warm-start gates not satisfied; increase warmup or data length."
+
+    trades = []
     trade = None
-    # Precompute ATR for speed
-    atr_series = atr_1m(df1m, risk_cfg.atr_window)
-
-    iterator = range(warmup, len(df1m))
     stride = int(cfg['logging'].get('progress_stride', 50))
-    total_bars = len(df1m) - warmup
+    total_bars = len(df1m) - start_i
 
-    blockers = {'regime_flat':0, 'wave_not_armed':0, 'trigger_fail':0}
-    for i in iterator:
-        row = df1m.iloc[i]
-        ts = row.name
-        # external progress hook (throttled)
-        if progress_hook is not None and (i == len(df1m)-1 or ((i - warmup) % max(1, stride) == 0)):
-            try:
-                progress_hook(symbol, i - warmup, total_bars)
-            except Exception:
-                pass
+    blockers = {'regime_flat': 0, 'wave_not_armed': 0, 'trigger_fail': 0}
 
-        # Manage open trade
+    for i in range(start_i, len(df1m)):
+        ts = df1m.index[i]
+
         if trade is not None and not trade.get('exit'):
-            update_stops(trade, row, atr_series.iloc[i], risk_cfg)
-            check_exit(trade, row)
+            risk.update_trade(trade, df1m.iloc[i], i)
+            risk.check_exit(trade, df1m.iloc[i])
             if trade.get('exit'):
-                # R computation
                 r0 = trade['r0']
                 if trade['direction'] == 'LONG':
-                    r_realized = (trade['exit'] - trade['entry'])/max(1e-9, r0)
+                    r_realized = (trade['exit'] - trade['entry']) / max(1e-9, r0)
                 else:
-                    r_realized = (trade['entry'] - trade['exit'])/max(1e-9, r0)
+                    r_realized = (trade['entry'] - trade['exit']) / max(1e-9, r0)
                 trade['r_realized'] = float(r_realized)
-                rows.append(trade)
+                trades.append(trade)
                 trade = None
-            # continue to next bar even if exit, but allow new entry same bar? We'll skip.
             continue
 
-        # No open trade -> check gates and trigger
         reg = regime.compute_at(ts)
-        side = 'LONG' if reg['dir'] == 'BULL' else ('SHORT' if reg['dir'] == 'BEAR' else 'FLAT')
-        if side == 'FLAT':
+        if reg['dir'] not in ('BULL', 'BEAR'):
             blockers['regime_flat'] += 1
             continue
 
-        wv = waves.compute_at(ts)
-        if (not wv.get('armed')) or wv.get('dir') != side:
+        wv = waves.compute_at(ts, i)
+        if not wv.get('armed', False):
             blockers['wave_not_armed'] += 1
             continue
 
-        # Use df1m up-to-ts for trigger calcs (causal)
-        window = df1m.iloc[:i+1]
-        trig = momentum_ignition(window, wv, side, cfg)
-        if not trig:
+        tchk = trigger.power_bar_ok(ts, i)
+        if not tchk.get('ok', False):
             blockers['trigger_fail'] += 1
             continue
 
-        # Open trade at close
-        entry = row['close']
-        stop0 = initial_stop(entry, trig['direction'], wv, window, risk_cfg)
-        r0 = entry - stop0 if trig['direction']=='LONG' else stop0 - entry
+        zret = tchk.get('zret', 0.0)
+        if reg['dir'] == 'BULL' and zret < tchk['z_k']:
+            blockers['trigger_fail'] += 1
+            continue
+        if reg['dir'] == 'BEAR' and zret > -tchk['z_k']:
+            blockers['trigger_fail'] += 1
+            continue
+
+        direction = 'LONG' if reg['dir'] == 'BULL' else 'SHORT'
+        entry = df1m['close'].iloc[i]
+        stop0 = risk.initial_stop(entry, direction, wv, i)
+        r0 = entry - stop0 if direction == 'LONG' else stop0 - entry
         r0 = max(1e-9, r0)
+
         trade = {
             'symbol': symbol,
-            'time': row.name.isoformat(),
-            'direction': trig['direction'],
+            'time': ts.isoformat(),
+            'direction': direction,
             'entry': float(entry),
             'stop': float(stop0),
             'r0': float(r0),
-            'reason': trig['reason'],
+            'reason': 'wavegate_momentum',
             'exit': None,
             'exit_reason': None,
             'stop_mode': 'INIT',
             'be_armed': False,
             'tsl_active': False,
             'be_price': float(entry),
-            'regime_score': float(reg.get('score', 0.0)),
-            'regime_strength': float(reg.get('strength', 0.0)),
             'wave_frame': wv.get('frame', 'event'),
+            'adapt_params': {
+                'wave': wv.get('params'),
+                'trigger': {'zscore_k': tchk['z_k'], 'range_atr_min': tchk['range_atr_min']},
+                'risk': risk.thresholds(i),
+            },
         }
 
-    # if trade still open, close at last
     if trade is not None and not trade.get('exit'):
         last = df1m.iloc[-1]
         trade['exit'] = float(last['close'])
         trade['exit_reason'] = 'EOD'
         if trade['direction'] == 'LONG':
-            r_realized = (trade['exit'] - trade['entry'])/max(1e-9, trade['r0'])
+            r_realized = (trade['exit'] - trade['entry']) / max(1e-9, trade['r0'])
         else:
-            r_realized = (trade['entry'] - trade['exit'])/max(1e-9, trade['r0'])
+            r_realized = (trade['entry'] - trade['exit']) / max(1e-9, trade['r0'])
         trade['r_realized'] = float(r_realized)
-        rows.append(trade)
+        trades.append(trade)
 
-    # Results
-    trades = pd.DataFrame(rows)
-    out_trades = os.path.join(outputs_dir, f"{symbol}_trades.csv")
-    trades.to_csv(out_trades, index=False)
+    trades_df = pd.DataFrame(trades)
+    trades_df.to_csv(os.path.join(outputs_dir, f"{symbol}_trades.csv"), index=False)
 
-    summary = {}
-    if not trades.empty:
-        summary = {
-            'symbol': symbol,
-            'trades': len(trades),
-            'win_rate': float((trades['r_realized']>0).mean()),
-            'avg_R': float(trades['r_realized'].mean()),
-            'median_R': float(trades['r_realized'].median()),
-            'sum_R': float(trades['r_realized'].sum()),
-            'exits': trades['exit_reason'].value_counts().to_dict(),
-            'blockers': blockers
-        }
-    else:
-        summary = {'symbol': symbol, 'trades': 0, 'blockers': blockers}
+    summary = {'symbol': symbol, 'trades': len(trades_df), 'blockers': blockers}
+    if not trades_df.empty:
+        summary.update({
+            'win_rate': float((trades_df['r_realized'] > 0).mean()),
+            'avg_R': float(trades_df['r_realized'].mean()),
+            'median_R': float(trades_df['r_realized'].median()),
+            'sum_R': float(trades_df['r_realized'].sum()),
+            'exits': trades_df['exit_reason'].value_counts().to_dict(),
+        })
 
     with open(os.path.join(outputs_dir, f"{symbol}_summary.json"), 'w') as f:
         json.dump(summary, f, indent=2)
 
     params = {
-        "cusum": {
-            "k_factor": k_base,
-            "k_min": k_min,
-            "k_max": k_max,
-            "atr_window_1m": int(wcfg['cusum']['atr_window_1m']),
-            "event_bars": int(len(df_event))
+        'cusum': {
+            'k_factor': float(cfg['waves']['cusum']['k_factor']),
+            'k_min': float(cfg['waves']['cusum']['k_min']),
+            'k_max': float(cfg['waves']['cusum']['k_max']),
+            'atr_window_1m': int(cfg['waves']['cusum']['atr_window_1m']),
+            'event_bars': int(len(df_event)),
         }
     }
     logs_dir = os.path.join(outputs_dir, 'logs')
@@ -178,8 +170,9 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
 
     return summary
 
+
 def run_all(config_path: str, progress_hook=None):
-    with open(config_path,'r') as f:
+    with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     summaries = []
     for sym in cfg['symbols']:
@@ -188,7 +181,7 @@ def run_all(config_path: str, progress_hook=None):
         except Exception as e:
             s = {'symbol': sym, 'error': str(e)}
         summaries.append(s)
-    # write combined
     with open(os.path.join(cfg['paths']['outputs_dir'], "combined_summary.json"), 'w') as f:
         json.dump(summaries, f, indent=2)
-    print("Done. Summaries:", summaries)
+    return summaries
+
