@@ -107,6 +107,10 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             'reason': trig['reason'],
             'exit': None,
             'exit_reason': None,
+            'stop_mode': 'INIT',
+            'be_armed': False,
+            'tsl_active': False,
+            'be_price': float(entry),
         }
 
     # if trade still open, close at last
