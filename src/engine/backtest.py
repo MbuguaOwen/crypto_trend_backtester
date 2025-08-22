@@ -20,6 +20,8 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     os.makedirs(outputs_dir, exist_ok=True)
 
     df1m = load_symbol_1m(inputs_dir, symbol, months, progress=cfg['logging']['progress'])
+    if "volume" not in df1m.columns:
+        df1m["volume"] = 0.0
     if len(df1m) < warmup + 500:
         raise RuntimeError("Insufficient 1m bars after loading.")
     # Precompute resampled frames once (no look-ahead; we slice by ts in-loop)
