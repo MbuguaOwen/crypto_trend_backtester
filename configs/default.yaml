@@ -14,13 +14,13 @@ regime:
     require_majority: 4          # 4 of 5
     timeframes:
       - tf: "1min"   # 1-minute
-        lookback_closes: 3
+        lookback_closes: 30
       - tf: "5min"
-        lookback_closes: 3
+        lookback_closes: 20
       - tf: "15min"
-        lookback_closes: 3
+        lookback_closes: 12
       - tf: "1h"
-        lookback_closes: 3
+        lookback_closes: 8
       - tf: "5h"     # NEW timeframe
         lookback_closes: 3
 
