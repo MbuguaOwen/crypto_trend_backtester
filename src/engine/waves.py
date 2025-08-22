@@ -17,7 +17,7 @@ class WaveGate:
         self.atr_window = int(wz['atr_window'])
         self.atr_mults = list(wz['atr_mults'])
         self.max_lookback_ev = int(wz['max_lookback_bars'])
-        self.min_coverage_minutes = 300  # ≥5h on 1m
+        self.min_cov_minutes = 300   # ≥ 5 hours of 1m coverage
 
         self.min_conf = float(thr['min_confidence'])
         self.w2_post_min = float(thr['w2_posterior_min'])
@@ -110,36 +110,55 @@ class WaveGate:
         conf = (depth_score + comp_score + time_score)/3.0
         return float(score), float(posterior), float(conf), depth
 
+    def _score_w2(self, df: pd.DataFrame, w: Dict):
+        score, post, conf, _ = self._score_w2_end(df, w)
+        armed = (score >= self.w2_end_arm) and (post >= self.w2_post_min) and (conf >= self.min_conf)
+        return armed, float(score), float(post), float(conf)
+
     def compute_at(self, ts):
+        if not isinstance(ts, pd.Timestamp):
+            ts = pd.to_datetime(ts, utc=True)
+
         df_e = self.df_event
         if df_e.empty or ts < df_e.index[0]:
             return {'armed': False}
+
         j = df_e.index.get_indexer([ts], method='pad')[0]
         if j == -1:
             return {'armed': False}
+
         start = max(0, j - self.max_lookback_ev)
         ev = df_e.iloc[start:j+1]
-        if len(ev) < 10:
+        if ev.empty or len(ev) < 2:
             return {'armed': False}
 
         t0 = ev.index[0]
-        span_1m = self.df1m.loc[self.df1m.index.slice_indexer(t0, ts)]
-        if len(span_1m) < self.min_coverage_minutes:
+        if not isinstance(t0, pd.Timestamp):
+            t0 = pd.to_datetime(t0, utc=True)
+
+        i0 = self.df1m.index.get_indexer([t0], method='backfill')[0]
+        i1 = self.df1m.index.get_indexer([ts], method='pad')[0]
+        if i0 == -1 or i1 == -1:
+            return {'armed': False}
+        coverage = (i1 - i0 + 1)
+        if coverage < self.min_cov_minutes:
             return {'armed': False}
 
-        tr = (ev['high'] - ev['low']).abs().to_frame('tr')
-        atr_series = tr.rolling(self.atr_window).mean()['tr']
-        piv = self._zigzag_atr(ev, atr_series, self.atr_mults[0])
-        w = self._w1_w2_from_pivots(piv)
+        tr = (ev['high'] - ev['low']).abs()
+        atr_ev = tr.rolling(self.atr_window, min_periods=self.atr_window).mean()
+        if atr_ev.isna().all():
+            return {'armed': False}
+
+        pivots = self._zigzag_atr(ev, atr_ev, self.atr_mults[0])
+        w = self._w1_w2_from_pivots(pivots)
         if w is None:
             return {'armed': False}
 
-        score, post, conf, depth = self._score_w2_end(ev, w)
-        armed = (score >= self.w2_end_arm) and (post >= self.w2_post_min) and (conf >= self.min_conf)
+        armed, score, post, conf = self._score_w2(ev, w)
         if not armed:
             return {'armed': False}
 
-        pos_end = ev.index.get_indexer([w['w1_end'][0]])[0]
+        pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
         if pos_end == -1:
             return {'armed': False}
         age_bars = (len(ev) - 1) - pos_end

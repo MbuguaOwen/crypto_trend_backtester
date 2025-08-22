@@ -1,75 +1,27 @@
-
 import os
 import pandas as pd
 import numpy as np
-from .utils import ensure_datetime_utc
 from tqdm import tqdm
 
-def _infer_timestamp_col(cols):
-    for c in cols:
-        lc = c.lower()
-        if lc in ('timestamp','ts','time','datetime','date'):
-            return c
-    raise ValueError("No timestamp-like column found. Expected one of: timestamp, ts, time, datetime.")
 
-def _infer_price_col(cols):
-    for c in cols:
-        lc = c.lower()
-        if lc in ('price','p','last','close'):
-            return c
-    raise ValueError("No price-like column found. Expected one of: price, p, last, close.")
+def ticks_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
+    """
+    df_ticks columns: ['timestamp','price','qty','is_buyer_maker']
+    timestamp in *milliseconds* since epoch.
+    Returns tz-aware UTC 1m OHLCV with ['open','high','low','close','volume'].
+    """
+    df = df_ticks.copy()
+    # ms -> UTC timestamp
+    df['ts'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    df = df.set_index('ts').sort_index()
 
-def _infer_qty_col(cols):
-    for c in cols:
-        lc = c.lower()
-        if lc in ('qty','quantity','amount','size','volume','vol'):
-            return c
-    # volume not strictly required; use 1
-    return None
-
-def read_ticks_to_1m(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    ts_col = _infer_timestamp_col(df.columns)
-    p_col  = _infer_price_col(df.columns)
-    q_col  = _infer_qty_col(df.columns)
-    ts = df[ts_col]
-    # Always coerce to a DatetimeIndex, supporting mixed content robustly.
-    # 1) If numeric-like → choose ms vs s by magnitude
-    if pd.api.types.is_integer_dtype(ts) or pd.api.types.is_float_dtype(ts):
-        ts = pd.to_numeric(ts, errors='coerce')
-        unit = 'ms' if float(ts.dropna().median()) > 1e12 else 's'
-        dt = pd.to_datetime(ts, unit=unit, utc=True, errors='coerce')
-    else:
-        # string/mixed → strip quotes/whitespace then parse with format='mixed' if available
-        s = ts.astype(str).str.strip().str.replace('"','', regex=False).replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
-        try:
-            # pandas >= 2.0 supports format='mixed'
-            dt = pd.to_datetime(s, utc=True, format='mixed', errors='coerce')
-        except TypeError:
-            # fallback: ISO8601 first, then general inference
-            try:
-                dt = pd.to_datetime(s, utc=True, format='ISO8601', errors='coerce')
-            except Exception:
-                dt = pd.to_datetime(s, utc=True, errors='coerce')
-    # Drop rows that failed to parse
-    bad = dt.isna()
-    if bad.any():
-        df = df.loc[~bad].copy()
-        dt = dt[~bad]
-    # use 'min' (not 'T') to avoid FutureWarning
-    idx = pd.DatetimeIndex(dt).floor('min')
-    df.index = idx
-    price = df[p_col].astype('float64')
-    vol = df[q_col].astype('float64') if q_col is not None else 1.0
-    out = pd.DataFrame({
-        'open': price.groupby(df.index).first(),
-        'high': price.groupby(df.index).max(),
-        'low' : price.groupby(df.index).min(),
-        'close': price.groupby(df.index).last(),
-        'volume': vol.groupby(df.index).sum()
-    }).dropna()
-    out.index.name = 'timestamp'
+    # price*qty as turnover proxy; here 'volume' = sum(qty); you can also store notional
+    ohlc = df['price'].resample('1min', label='right', closed='right').ohlc()
+    vol  = df['qty'].resample('1min', label='right', closed='right').sum().rename('volume')
+    out = pd.concat([ohlc, vol], axis=1).dropna()
+    out.index = pd.DatetimeIndex(out.index, tz='UTC')
     return out
+
 
 def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
     frames = []
@@ -89,12 +41,12 @@ def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
             bar.set_postfix_str(m)
         else:
             print(f"[{symbol}] Loading {m} → {os.path.basename(path)}")
-        frames.append(read_ticks_to_1m(path))
+        df_ticks = pd.read_csv(path)
+        frames.append(ticks_to_1m(df_ticks))
     if bar is not None:
         bar.close()
     if not frames:
         raise FileNotFoundError(f"No monthly files found for {symbol}. Looked for months={months}.")
     df = pd.concat(frames).sort_index()
-    # dedup minutes if any overlap
     df = df[~df.index.duplicated(keep='last')]
     return df
