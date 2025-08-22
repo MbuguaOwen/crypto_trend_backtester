@@ -1,8 +1,9 @@
 import os
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from typing import Tuple, Optional
+from typing import Optional
 
 
 PRICE_ALIASES = ["price", "p", "last", "trade_price"]
@@ -163,6 +164,9 @@ def ticks_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
+    cache_dir = Path(inputs_dir) / "_cache_1m" / symbol
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
     frames = []
     iterator = months
     bar = None
@@ -170,19 +174,24 @@ def load_symbol_1m(inputs_dir: str, symbol: str, months: list, progress=True):
         bar = tqdm(months, desc=f"{symbol} months", ncols=100, leave=False)
         iterator = bar
     for m in iterator:
-        fn = f"{symbol}/{symbol}-ticks-{m}.csv"
-        path = os.path.join(inputs_dir, fn)
-        if not os.path.exists(path):
-            if not progress:
-                print(f"[{symbol}] MISSING {m} → {os.path.basename(fn)}")
-            continue
-        if progress and bar is not None:
-            bar.set_postfix_str(m)
+        csv_path = Path(inputs_dir) / f"{symbol}/{symbol}-ticks-{m}.csv"
+        pq_path = cache_dir / f"{symbol}-1m-{m}.parquet"
+        if pq_path.exists():
+            df_1m = pd.read_parquet(pq_path)
         else:
-            print(f"[{symbol}] Loading {m} → {os.path.basename(path)}")
-        # Let the parser handle the timestamp type
-        df_ticks = pd.read_csv(path)
-        frames.append(ticks_to_1m(df_ticks))
+            if not csv_path.exists():
+                continue
+            if progress and bar is not None:
+                bar.set_postfix_str(m)
+            else:
+                print(f"[{symbol}] Loading {m} → {csv_path.name}")
+            try:
+                df_ticks = pd.read_csv(csv_path, dtype={"timestamp": "int64", "price": "float64", "qty": "float64"})
+            except Exception:
+                df_ticks = pd.read_csv(csv_path)
+            df_1m = ticks_to_1m(df_ticks)
+            df_1m.to_parquet(pq_path, index=True)
+        frames.append(df_1m)
     if bar is not None:
         bar.close()
     if not frames:

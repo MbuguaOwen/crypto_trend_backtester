@@ -24,36 +24,40 @@ class TSMOMRegime:
         self.require = int(cfg['regime']['ts_mom']['require_majority'])
         # pre-resample each TF once
         self.frames = {spec['tf']: _resample(df1m, spec['tf']) for spec in self.tf_specs}
+        self._prep = {}
+        for spec in self.tf_specs:
+            tf = spec['tf']; k = int(spec.get('lookback_closes', 3))
+            df = self.frames[tf]
+            close = df['close']
+            pct = pd.concat([(close / close.shift(i) - 1.0) for i in range(1, k + 1)], axis=1)
+            rets_sign = np.sign(pct.values)
+            rets_sign = np.nan_to_num(rets_sign, nan=0.0)
+            maj = np.sign(rets_sign.sum(axis=1))
+            mean = pct.mean(axis=1).values.reshape(-1, 1)
+            std = pct.std(axis=1).replace(0, np.nan).values.reshape(-1, 1)
+            z = (pct - mean) / std
+            strength = np.abs(z).mean(axis=1)
+            self._prep[tf] = {
+                'maj': pd.Series(maj, index=df.index),
+                'str': pd.Series(strength, index=df.index)
+            }
 
     def compute_at(self, ts) -> dict:
         votes = []
         strength_parts = []
 
         for spec in self.tf_specs:
-            tf = spec['tf']; k = int(spec.get('lookback_closes', 3))
+            tf = spec['tf']
             df = self.frames[tf]
-            if ts < df.index[0]:
-                return {'dir':'FLAT','score':0.0,'strength':0.0}
             idx = df.index.get_indexer([ts], method='pad')[0]
             if idx == -1:
                 return {'dir':'FLAT','score':0.0,'strength':0.0}
-
-            df_cut = df.iloc[:idx+1]
-            if len(df_cut) < (k+1):
+            maj_series = self._prep[tf]['maj']
+            str_series = self._prep[tf]['str']
+            if idx >= len(maj_series) or pd.isna(maj_series.iat[idx]):
                 return {'dir':'FLAT','score':0.0,'strength':0.0}
-
-            close = df_cut['close']
-            # signs of last k close-vs-close changes
-            rets = [np.sign(close.iloc[-1] - close.shift(i).iloc[-1]) for i in range(1, k+1)]
-            v = int(np.sign(sum(rets)))  # majority within TF; ties -> 0
-            votes.append(v)
-
-            # strength: mean |z| across those k closes
-            pct = [ (close.iloc[-1] / close.shift(i).iloc[-1] - 1.0) for i in range(1, k+1) ]
-            x = np.array(pct, dtype=float)
-            if np.all(np.isfinite(x)) and x.std() > 0:
-                z = (x - x.mean()) / (x.std() + 1e-12)
-                strength_parts.append(np.abs(z).mean())
+            votes.append(int(maj_series.iat[idx]))
+            strength_parts.append(float(str_series.iat[idx]))
 
         bulls = sum(1 for v in votes if v > 0)
         bears = sum(1 for v in votes if v < 0)

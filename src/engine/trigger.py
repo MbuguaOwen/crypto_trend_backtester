@@ -1,7 +1,7 @@
 import pandas as pd
 
 from .adaptive import AdaptiveController
-from .utils import zscore_logret, body_dom, true_range_last
+from .utils import zscore_logret, body_dom
 
 
 class Trigger:
@@ -10,6 +10,16 @@ class Trigger:
         self.df1m = df1m
         self.atr1m = atr1m
         self.ac = ac
+
+        win = int(cfg['entry']['momentum']['zscore_window'])
+        self._zret = zscore_logret(df1m['close'], win)
+        prev_c = df1m['close'].shift(1)
+        tr_series = pd.concat([
+            (df1m['high'] - df1m['low']),
+            (df1m['high'] - prev_c).abs(),
+            (df1m['low'] - prev_c).abs()
+        ], axis=1).max(axis=1)
+        self._tr_over_atr = tr_series / self.atr1m.replace(0, 1e-9)
 
     def power_bar_ok(self, ts: pd.Timestamp, i_bar_1m: int) -> dict:
         tp = self.ac.trigger_params(i_bar_1m)
@@ -22,14 +32,10 @@ class Trigger:
         if i_bar_1m < win + 2:
             return {'ok': False, 'z_k': z_k, 'range_atr_min': rng_min}
 
-        df_cut = self.df1m.iloc[:i_bar_1m + 1]
-        zret = zscore_logret(df_cut['close'], win).iloc[-1]
-        last = df_cut.iloc[-1]
-        prev_close = df_cut['close'].iloc[-2]
+        last = self.df1m.iloc[i_bar_1m]
         body = body_dom(last)
-        tr = true_range_last(last, prev_close)
-        atr = self.atr1m.iloc[i_bar_1m]
-        tratr = tr / max(1e-9, atr)
+        zret = float(self._zret.iat[i_bar_1m])
+        tratr = float(self._tr_over_atr.iat[i_bar_1m])
 
         ok = (abs(zret) >= z_k) and (body >= min_body) and (tratr >= rng_min)
         return {

@@ -12,6 +12,13 @@ class WaveGate:
         self.ac = ac
         self.max_lookback_ev = int(cfg['waves']['zigzag']['max_lookback_bars'])
         self.min_cov_minutes = 300    # ≥5h underlying coverage
+        self.ev_tr = (self.df_event['high'] - self.df_event['low']).abs()
+        self.ev_tr_cum = self.ev_tr.cumsum()
+
+    def _rolling_mean_fast(self, j_end: int, w: int) -> float:
+        j0 = max(0, j_end - w + 1)
+        total = float(self.ev_tr_cum.iat[j_end] - (self.ev_tr_cum.iat[j0 - 1] if j0 > 0 else 0.0))
+        return total / float(j_end - j0 + 1)
 
     # --- PREWARM: walk event bars up to ts_end and record W2 candidates for quantiles
     def prewarm_until(self, ts_end: pd.Timestamp):
@@ -24,7 +31,8 @@ class WaveGate:
         seen = 0
         step = max(1, len(dfe.iloc[:j + 1]) // 1000)
         for jj in range(0, j + 1, step):
-            ev = dfe.iloc[max(0, jj - self.max_lookback_ev): jj + 1]
+            idx_range = range(max(0, jj - self.max_lookback_ev), jj + 1)
+            ev = dfe.iloc[idx_range.start: idx_range.stop]
             if len(ev) < 10:
                 continue
             t0 = ev.index[0]
@@ -34,9 +42,10 @@ class WaveGate:
                 continue
             if (i1 - i0 + 1) < self.min_cov_minutes:
                 continue
-            tr = (ev['high'] - ev['low']).abs()
             aw_min, aw_max = self.cfg['waves']['adaptive']['atr_window_range']
-            atr_ev = tr.rolling(int((aw_min + aw_max) // 2), min_periods=int((aw_min + aw_max) // 2)).mean()
+            w = int((aw_min + aw_max) // 2)
+            atr_vals = [self._rolling_mean_fast(j_end, w) for j_end in idx_range]
+            atr_ev = pd.Series(atr_vals, index=ev.index)
             if atr_ev.isna().all():
                 continue
             am_min, am_max = self.cfg['waves']['adaptive']['atr_mult_range']
@@ -65,7 +74,8 @@ class WaveGate:
         j = dfe.index.get_indexer([ts], method='pad')[0]
         if j == -1:
             return {'armed': False}
-        ev = dfe.iloc[max(0, j - self.max_lookback_ev): j + 1]
+        idx_range = range(max(0, j - self.max_lookback_ev), j + 1)
+        ev = dfe.iloc[idx_range.start: idx_range.stop]
         if len(ev) < 10:
             return {'armed': False}
 
@@ -78,8 +88,8 @@ class WaveGate:
             return {'armed': False}
 
         p: WaveParams = self.ac.waves_params(i_bar_1m)
-        tr = (ev['high'] - ev['low']).abs()
-        atr_ev = tr.rolling(p.atr_window, min_periods=p.atr_window).mean()
+        atr_vals = [self._rolling_mean_fast(j_end, p.atr_window) for j_end in idx_range]
+        atr_ev = pd.Series(atr_vals, index=ev.index)
         if atr_ev.isna().all():
             return {'armed': False}
 
