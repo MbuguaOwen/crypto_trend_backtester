@@ -13,12 +13,29 @@ class WaveGate:
         self.max_lookback_ev = int(cfg['waves']['zigzag']['max_lookback_bars'])
         self.min_cov_minutes = 300    # ≥5h underlying coverage
 
+        self._ts_1m = self.df1m.index.view('i8')
+        self._ts_ev = self.df_event.index.view('i8') if not self.df_event.empty else np.array([], dtype=np.int64)
+
+    def _pad_idx_1m(self, ts_ns: int) -> int:
+        i = np.searchsorted(self._ts_1m, ts_ns, side='right') - 1
+        return i if i >= 0 else -1
+
+    def _bfill_idx_1m(self, ts_ns: int) -> int:
+        i = np.searchsorted(self._ts_1m, ts_ns, side='left')
+        return i if i < self._ts_1m.size else -1
+
+    def _pad_idx_ev(self, ts_ns: int) -> int:
+        if self._ts_ev.size == 0:
+            return -1
+        j = np.searchsorted(self._ts_ev, ts_ns, side='right') - 1
+        return j if j >= 0 else -1
+
     # --- PREWARM: walk event bars up to ts_end and record W2 candidates for quantiles
     def prewarm_until(self, ts_end: pd.Timestamp):
         dfe = self.df_event
         if dfe.empty or ts_end < dfe.index[0]:
             return 0
-        j = dfe.index.get_indexer([ts_end], method='pad')[0]
+        j = self._pad_idx_ev(int(ts_end.value))
         if j == -1:
             return 0
         seen = 0
@@ -27,9 +44,8 @@ class WaveGate:
             ev = dfe.iloc[max(0, jj - self.max_lookback_ev): jj + 1]
             if len(ev) < 10:
                 continue
-            t0 = ev.index[0]
-            i0 = self.df1m.index.get_indexer([t0], method='backfill')[0]
-            i1 = self.df1m.index.get_indexer([ev.index[-1]], method='pad')[0]
+            i0 = self._bfill_idx_1m(int(ev.index[0].value))
+            i1 = self._pad_idx_1m(int(ev.index[-1].value))
             if i0 == -1 or i1 == -1:
                 continue
             if (i1 - i0 + 1) < self.min_cov_minutes:
@@ -47,7 +63,7 @@ class WaveGate:
             armed, score, post, conf = self._score_w2(ev, w, 0.62, 0.60, 0.60)
             if not armed:
                 continue
-            pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
+            pos_end = np.searchsorted(ev.index.view('i8'), int(w['w1_end'][0].value), side='right') - 1
             if pos_end == -1:
                 continue
             age_bars = (len(ev) - 1) - pos_end
@@ -62,16 +78,15 @@ class WaveGate:
         dfe = self.df_event
         if dfe.empty or ts < dfe.index[0]:
             return {'armed': False}
-        j = dfe.index.get_indexer([ts], method='pad')[0]
+        j = self._pad_idx_ev(int(ts.value))
         if j == -1:
             return {'armed': False}
         ev = dfe.iloc[max(0, j - self.max_lookback_ev): j + 1]
         if len(ev) < 10:
             return {'armed': False}
 
-        t0 = ev.index[0]
-        i0 = self.df1m.index.get_indexer([t0], method='backfill')[0]
-        i1 = self.df1m.index.get_indexer([ts], method='pad')[0]
+        i0 = self._bfill_idx_1m(int(ev.index[0].value))
+        i1 = self._pad_idx_1m(int(ts.value))
         if i0 == -1 or i1 == -1:
             return {'armed': False}
         if (i1 - i0 + 1) < self.min_cov_minutes:
@@ -92,7 +107,7 @@ class WaveGate:
         if not armed:
             return {'armed': False}
 
-        pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
+        pos_end = np.searchsorted(ev.index.view('i8'), int(w['w1_end'][0].value), side='right') - 1
         if pos_end == -1:
             return {'armed': False}
         age_bars = (len(ev) - 1) - pos_end

@@ -65,3 +65,41 @@ class TSMOMRegime:
 
         strength = float(np.median(strength_parts)) if strength_parts else 0.0
         return {'dir': dir_, 'score': float(score), 'strength': strength}
+
+    def precompute_on_1m(self, df1m_index: pd.DatetimeIndex) -> np.ndarray:
+        """
+        Precompute regime direction aligned to df1m_index.
+        Returns int8 array: -1=BEAR, 0=FLAT, +1=BULL
+        """
+        out_dir = np.zeros(len(df1m_index), dtype=np.int8)
+        frames = {spec['tf']: self.frames[spec['tf']] for spec in self.tf_specs}
+        ptrs = {tf: 0 for tf in frames}
+
+        for i, ts in enumerate(df1m_index):
+            votes = []
+            for spec in self.tf_specs:
+                tf = spec['tf']; k = int(spec.get('lookback_closes', 3))
+                f = frames[tf]
+                p = ptrs[tf]
+                fi = f.index
+                while p + 1 < len(fi) and fi[p + 1] <= ts:
+                    p += 1
+                ptrs[tf] = p
+                if p < k:
+                    v = 0
+                else:
+                    close = f['close'].iloc[:p + 1]
+                    rets = [np.sign(close.iloc[-1] - close.shift(j).iloc[-1]) for j in range(1, k + 1)]
+                    v = int(np.sign(sum(rets)))
+                votes.append(v)
+
+            bulls = sum(1 for v in votes if v > 0)
+            bears = sum(1 for v in votes if v < 0)
+            if bulls >= self.require:
+                out_dir[i] = 1
+            elif bears >= self.require:
+                out_dir[i] = -1
+            else:
+                out_dir[i] = 0
+
+        return out_dir

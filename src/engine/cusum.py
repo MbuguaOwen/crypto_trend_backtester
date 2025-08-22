@@ -1,52 +1,95 @@
 import numpy as np
 import pandas as pd
+from numba import njit
 
 
-def build_cusum_bars(df1m: pd.DataFrame, kappa: pd.Series) -> pd.DataFrame:
-    """
-    Build event-time OHLCV bars from 1m OHLCV via CUSUM on close-to-close deltas.
-    κ (kappa) must be a Series aligned to df1m.index (tz-aware UTC).
-    Emits bars with index = event end timestamps (tz-aware UTC).
-    Causal: only completes a bar when |cumΔ| >= κ at that bar, then resets.
-    """
-    assert df1m.index.equals(kappa.index), "kappa must align to df1m index"
+@njit(cache=True, fastmath=True)
+def _cusum_core(close, high, low, volume, kappa):
+    rows_ts = []
+    rows_o = []
+    rows_h = []
+    rows_l = []
+    rows_c = []
+    rows_v = []
 
-    rows = []
-    open_, high_, low_, vol_ = None, None, None, 0.0
-    last_close = None
+    n = close.shape[0]
+    if n == 0:
+        return (
+            np.empty((0,), dtype=np.int64),
+            np.empty((0,)),
+            np.empty((0,)),
+            np.empty((0,)),
+            np.empty((0,)),
+            np.empty((0,)),
+        )
+
+    last_close = close[0]
+    open_ = close[0]
+    high_ = high[0]
+    low_ = low[0]
+    vol_ = volume[0]
     cum = 0.0
 
-    for ts, row in df1m.iterrows():
-        close = float(row['close'])
-        if last_close is None:
-            last_close = close
-            open_ = float(row['open']); high_ = float(row['high'])
-            low_ = float(row['low']);  vol_  = float(row['volume'])
-            continue
+    for i in range(1, n):
+        c = close[i]
+        delta = c - last_close
+        last_close = c
 
-        delta = close - last_close
-        last_close = close
+        if high[i] > high_:
+            high_ = high[i]
+        if low[i] < low_:
+            low_ = low[i]
+        vol_ += volume[i]
 
-        # roll OHLCV for the current (open) segment
-        high_ = max(high_, float(row['high']))
-        low_  = min(low_,  float(row['low']))
-        vol_ += float(row['volume'])
-
-        k = float(kappa.loc[ts])
-        if k <= 0:
+        k = kappa[i]
+        if k <= 0.0:
             continue
 
         cum += delta
         if abs(cum) >= k:
-            # complete an event bar at this timestamp
-            rows.append((ts, open_, high_, low_, close, vol_))
-            # reset segment (starting next bar)
-            open_, high_, low_, vol_ = close, close, close, 0.0
+            rows_ts.append(i)
+            rows_o.append(open_)
+            rows_h.append(high_)
+            rows_l.append(low_)
+            rows_c.append(c)
+            rows_v.append(vol_)
+
+            open_ = c
+            high_ = c
+            low_ = c
+            vol_ = 0.0
             cum = 0.0
 
-    if not rows:
-        return pd.DataFrame(columns=['open','high','low','close','volume'],
-                            index=pd.DatetimeIndex([], tz=df1m.index.tz))
-    out = pd.DataFrame(rows, columns=['ts','open','high','low','close','volume']).set_index('ts')
-    out.index = pd.DatetimeIndex(out.index, tz=df1m.index.tz)  # ensure tz-aware
+    return (
+        np.array(rows_ts, dtype=np.int64),
+        np.array(rows_o),
+        np.array(rows_h),
+        np.array(rows_l),
+        np.array(rows_c),
+        np.array(rows_v),
+    )
+
+
+def build_cusum_bars(df1m: pd.DataFrame, kappa: pd.Series) -> pd.DataFrame:
+    assert df1m.index.equals(kappa.index), "kappa must align to df1m index"
+
+    close = df1m['close'].to_numpy(dtype=np.float64)
+    high = df1m['high'].to_numpy(dtype=np.float64)
+    low = df1m['low'].to_numpy(dtype=np.float64)
+    vol = df1m['volume'].to_numpy(dtype=np.float64)
+    kap = kappa.to_numpy(dtype=np.float64)
+
+    idxs, o, h, l, c, v = _cusum_core(close, high, low, vol, kap)
+    if idxs.size == 0:
+        return pd.DataFrame(
+            columns=['open', 'high', 'low', 'close', 'volume'],
+            index=pd.DatetimeIndex([], tz=df1m.index.tz),
+        )
+
+    ts = df1m.index.values[idxs]
+    out = pd.DataFrame(
+        {'open': o, 'high': h, 'low': l, 'close': c, 'volume': v},
+        index=pd.DatetimeIndex(ts, tz=df1m.index.tz),
+    )
     return out
+

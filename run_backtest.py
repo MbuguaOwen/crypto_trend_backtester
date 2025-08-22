@@ -24,10 +24,13 @@ def main():
     ap = argparse.ArgumentParser(description="WaveGate Momentum Backtester")
     ap.add_argument("--config", required=True, help="Path to YAML config")
     ap.add_argument("--workers", type=int, default=0, help="Number of processes (0 = all cores)")
+    ap.add_argument("--progress-stride", type=int, default=None, help="Stride for progress updates")
     args = ap.parse_args()
 
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
+    if args.progress_stride is not None:
+        cfg.setdefault('logging', {})['progress_stride'] = args.progress_stride
 
     symbols = list(cfg.get('symbols', []))
     if not symbols:
