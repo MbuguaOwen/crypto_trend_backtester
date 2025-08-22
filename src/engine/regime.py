@@ -12,7 +12,7 @@ TF_MAP = {
 def _resample(df1m, tf):
     if tf == "1min":
         return df1m
-    rule = TF_MAP[tf]
+    rule = TF_MAP[tf].lower()
     return df1m.resample(rule, label='right', closed='right').agg({
         'open':'first','high':'max','low':'min','close':'last','volume':'sum'
     }).dropna()

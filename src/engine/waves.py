@@ -1,28 +1,131 @@
-import math
-import numpy as np
 import pandas as pd
-from typing import Dict, Optional
+import numpy as np
 
-from .utils import atr
+from .adaptive import AdaptiveController, WaveParams
 
 
 class WaveGate:
-    """Wave gate operating on event-time bars."""
-    def __init__(self, cfg: dict, df_event: pd.DataFrame, df1m: pd.DataFrame):
-        wz = cfg['waves']['zigzag']
-        thr = cfg['waves']['thresholds']
+    def __init__(self, cfg: dict, df_event: pd.DataFrame, df1m: pd.DataFrame, ac: AdaptiveController):
         self.cfg = cfg
-        self.df_event = df_event
-        self.df1m = df1m
-        self.atr_window = int(wz['atr_window'])
-        self.atr_mults = list(wz['atr_mults'])
-        self.max_lookback_ev = int(wz['max_lookback_bars'])
-        self.min_cov_minutes = 300   # ≥ 5 hours of 1m coverage
+        self.df_event = df_event      # tz-aware event bars
+        self.df1m = df1m              # tz-aware 1m bars
+        self.ac = ac
+        self.max_lookback_ev = int(cfg['waves']['zigzag']['max_lookback_bars'])
+        self.min_cov_minutes = 300    # ≥5h underlying coverage
 
-        self.min_conf = float(thr['min_confidence'])
-        self.w2_post_min = float(thr['w2_posterior_min'])
-        self.w2_end_arm = float(thr['w2_end_arm'])
-        self.max_age_impulse_bars = int(thr['max_age_impulse_bars'])
+    # --- PREWARM: walk event bars up to ts_end and record W2 candidates for quantiles
+    def prewarm_until(self, ts_end: pd.Timestamp):
+        dfe = self.df_event
+        if dfe.empty or ts_end < dfe.index[0]:
+            return 0
+        j = dfe.index.get_indexer([ts_end], method='pad')[0]
+        if j == -1:
+            return 0
+        seen = 0
+        step = max(1, len(dfe.iloc[:j + 1]) // 1000)
+        for jj in range(0, j + 1, step):
+            ev = dfe.iloc[max(0, jj - self.max_lookback_ev): jj + 1]
+            if len(ev) < 10:
+                continue
+            t0 = ev.index[0]
+            i0 = self.df1m.index.get_indexer([t0], method='backfill')[0]
+            i1 = self.df1m.index.get_indexer([ev.index[-1]], method='pad')[0]
+            if i0 == -1 or i1 == -1:
+                continue
+            if (i1 - i0 + 1) < self.min_cov_minutes:
+                continue
+            tr = (ev['high'] - ev['low']).abs()
+            aw_min, aw_max = self.cfg['waves']['adaptive']['atr_window_range']
+            atr_ev = tr.rolling(int((aw_min + aw_max) // 2), min_periods=int((aw_min + aw_max) // 2)).mean()
+            if atr_ev.isna().all():
+                continue
+            am_min, am_max = self.cfg['waves']['adaptive']['atr_mult_range']
+            piv = self._zigzag_atr(ev, atr_ev, (am_min + am_max) / 2.0)
+            w = self._w1_w2_from_pivots(piv)
+            if w is None:
+                continue
+            armed, score, post, conf = self._score_w2(ev, w, 0.62, 0.60, 0.60)
+            if not armed:
+                continue
+            pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
+            if pos_end == -1:
+                continue
+            age_bars = (len(ev) - 1) - pos_end
+            self.ac.record_w2(score, post, conf, age_bars)
+            seen += 1
+        return seen
+
+    # --- LIVE: compute at 1m ts using strictly adaptive params
+    def compute_at(self, ts: pd.Timestamp, i_bar_1m: int):
+        if not isinstance(ts, pd.Timestamp):
+            ts = pd.to_datetime(ts, utc=True)
+        dfe = self.df_event
+        if dfe.empty or ts < dfe.index[0]:
+            return {'armed': False}
+        j = dfe.index.get_indexer([ts], method='pad')[0]
+        if j == -1:
+            return {'armed': False}
+        ev = dfe.iloc[max(0, j - self.max_lookback_ev): j + 1]
+        if len(ev) < 10:
+            return {'armed': False}
+
+        t0 = ev.index[0]
+        i0 = self.df1m.index.get_indexer([t0], method='backfill')[0]
+        i1 = self.df1m.index.get_indexer([ts], method='pad')[0]
+        if i0 == -1 or i1 == -1:
+            return {'armed': False}
+        if (i1 - i0 + 1) < self.min_cov_minutes:
+            return {'armed': False}
+
+        p: WaveParams = self.ac.waves_params(i_bar_1m)
+        tr = (ev['high'] - ev['low']).abs()
+        atr_ev = tr.rolling(p.atr_window, min_periods=p.atr_window).mean()
+        if atr_ev.isna().all():
+            return {'armed': False}
+
+        piv = self._zigzag_atr(ev, atr_ev, p.atr_mult0)
+        w = self._w1_w2_from_pivots(piv)
+        if w is None:
+            return {'armed': False}
+
+        armed, score, post, conf = self._score_w2(ev, w, p.w2_end_arm, p.w2_post_min, p.min_conf)
+        if not armed:
+            return {'armed': False}
+
+        pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
+        if pos_end == -1:
+            return {'armed': False}
+        age_bars = (len(ev) - 1) - pos_end
+        if age_bars > p.max_age_bars:
+            return {'armed': False}
+
+        self.ac.record_w2(score, post, conf, age_bars)
+
+        if w['dir'] == 'LONG':
+            w2_high = w['w1_end'][1]
+            w2_low = w['w2_end'][1]
+        else:
+            w2_low = w['w1_end'][1]
+            w2_high = w['w2_end'][1]
+
+        return {
+            'armed': True,
+            'dir': w['dir'],
+            'w2_high': w2_high,
+            'w2_low': w2_low,
+            'score': score,
+            'posterior': post,
+            'confidence': conf,
+            'frame': 'event',
+            'params': {
+                'atr_mult0': p.atr_mult0,
+                'atr_window': p.atr_window,
+                'w2_end_arm': p.w2_end_arm,
+                'w2_post_min': p.w2_post_min,
+                'min_conf': p.min_conf,
+                'max_age_bars': p.max_age_bars,
+            },
+        }
 
     @staticmethod
     def _zigzag_atr(df: pd.DataFrame, atr_series: pd.Series, mult: float):
@@ -65,30 +168,32 @@ class WaveGate:
             pivots = [(df.index[0], df['low'].iloc[0], 'L')]
         return pivots
 
-    def _w1_w2_from_pivots(self, pivots):
+    @staticmethod
+    def _w1_w2_from_pivots(pivots):
         if len(pivots) < 3:
             return None
-        for i in range(len(pivots)-1, 1, -1):
+        for i in range(len(pivots) - 1, 1, -1):
             p2 = pivots[i]
-            p1 = pivots[i-1]
-            p0 = pivots[i-2]
+            p1 = pivots[i - 1]
+            p0 = pivots[i - 2]
             patt = (p0[2], p1[2], p2[2])
-            if patt == ('L','H','L'):
-                return {'dir':'LONG','w1_start':p0,'w1_end':p1,'w2_end':p2}
-            if patt == ('H','L','H'):
-                return {'dir':'SHORT','w1_start':p0,'w1_end':p1,'w2_end':p2}
+            if patt == ('L', 'H', 'L'):
+                return {'dir': 'LONG', 'w1_start': p0, 'w1_end': p1, 'w2_end': p2}
+            if patt == ('H', 'L', 'H'):
+                return {'dir': 'SHORT', 'w1_start': p0, 'w1_end': p1, 'w2_end': p2}
         return None
 
-    def _score_w2_end(self, df: pd.DataFrame, w: Dict) -> tuple:
-        (t0,p0,_),(t1,p1,_),(t2,p2,_) = w['w1_start'], w['w1_end'], w['w2_end']
-        if w['dir']=='LONG':
+    @staticmethod
+    def _score_w2(df: pd.DataFrame, w, w2_end_arm: float, w2_post_min: float, min_conf: float):
+        (t0, p0, _), (t1, p1, _), (t2, p2, _) = w['w1_start'], w['w1_end'], w['w2_end']
+        if w['dir'] == 'LONG':
             w1_low, w1_high = p0, p1
             w2_low = p2
-            depth = (w1_high - w2_low)/max(1e-9,(w1_high - w1_low))
+            depth = (w1_high - w2_low) / max(1e-9, (w1_high - w1_low))
         else:
             w1_high, w1_low = p0, p1
             w2_high = p2
-            depth = (w2_high - w1_low)/max(1e-9,(w1_high - w1_low))
+            depth = (w2_high - w1_low) / max(1e-9, (w1_high - w1_low))
 
         depth_score = 0.0
         if 0.50 <= depth <= 0.618:
@@ -96,89 +201,18 @@ class WaveGate:
         elif 0.618 < depth <= 0.786:
             depth_score = 0.7
 
-        atr3 = atr(df, 3).iloc[-1]
-        med20 = atr(df, 20).iloc[-20:].median()
+        atr3 = (df['high'] - df['low']).rolling(3).max().iloc[-1]
+        med20 = (df['high'] - df['low']).rolling(20).max().iloc[-20:].median()
         comp_ratio = float(atr3 / max(1e-9, med20))
-        comp_score = 1.0 if comp_ratio <= 0.7 else (0.0 if comp_ratio >= 1.0 else (1.0 - (comp_ratio-0.7)/0.3))
+        comp_score = 1.0 if comp_ratio <= 0.7 else (0.0 if comp_ratio >= 1.0 else (1.0 - (comp_ratio - 0.7) / 0.3))
 
         bars_w1 = max(1, df.index.get_loc(t1) - df.index.get_loc(t0))
         bars_w2 = max(1, df.index.get_loc(t2) - df.index.get_loc(t1))
-        time_score = 1.0 if bars_w2 <= 1.5*bars_w1 else (0.0 if bars_w2 >= 3.0*bars_w1 else 0.5)
+        time_score = 1.0 if bars_w2 <= 1.5 * bars_w1 else (0.0 if bars_w2 >= 3.0 * bars_w1 else 0.5)
 
-        score = 0.30*depth_score + 0.20*comp_score + 0.10*time_score + 0.40*0.75
-        posterior = 0.6*depth_score + 0.4*comp_score
-        conf = (depth_score + comp_score + time_score)/3.0
-        return float(score), float(posterior), float(conf), depth
+        score = 0.30 * depth_score + 0.20 * comp_score + 0.10 * time_score + 0.40 * 0.75
+        posterior = 0.6 * depth_score + 0.4 * comp_score
+        conf = (depth_score + comp_score + time_score) / 3.0
+        armed = (score >= w2_end_arm) and (posterior >= w2_post_min) and (conf >= min_conf)
+        return armed, float(score), float(posterior), float(conf)
 
-    def _score_w2(self, df: pd.DataFrame, w: Dict):
-        score, post, conf, _ = self._score_w2_end(df, w)
-        armed = (score >= self.w2_end_arm) and (post >= self.w2_post_min) and (conf >= self.min_conf)
-        return armed, float(score), float(post), float(conf)
-
-    def compute_at(self, ts):
-        if not isinstance(ts, pd.Timestamp):
-            ts = pd.to_datetime(ts, utc=True)
-
-        df_e = self.df_event
-        if df_e.empty or ts < df_e.index[0]:
-            return {'armed': False}
-
-        j = df_e.index.get_indexer([ts], method='pad')[0]
-        if j == -1:
-            return {'armed': False}
-
-        start = max(0, j - self.max_lookback_ev)
-        ev = df_e.iloc[start:j+1]
-        if ev.empty or len(ev) < 2:
-            return {'armed': False}
-
-        t0 = ev.index[0]
-        if not isinstance(t0, pd.Timestamp):
-            t0 = pd.to_datetime(t0, utc=True)
-
-        i0 = self.df1m.index.get_indexer([t0], method='backfill')[0]
-        i1 = self.df1m.index.get_indexer([ts], method='pad')[0]
-        if i0 == -1 or i1 == -1:
-            return {'armed': False}
-        coverage = (i1 - i0 + 1)
-        if coverage < self.min_cov_minutes:
-            return {'armed': False}
-
-        tr = (ev['high'] - ev['low']).abs()
-        atr_ev = tr.rolling(self.atr_window, min_periods=self.atr_window).mean()
-        if atr_ev.isna().all():
-            return {'armed': False}
-
-        pivots = self._zigzag_atr(ev, atr_ev, self.atr_mults[0])
-        w = self._w1_w2_from_pivots(pivots)
-        if w is None:
-            return {'armed': False}
-
-        armed, score, post, conf = self._score_w2(ev, w)
-        if not armed:
-            return {'armed': False}
-
-        pos_end = ev.index.get_indexer([w['w1_end'][0]], method='pad')[0]
-        if pos_end == -1:
-            return {'armed': False}
-        age_bars = (len(ev) - 1) - pos_end
-        if age_bars > self.max_age_impulse_bars:
-            return {'armed': False}
-
-        if w['dir'] == 'LONG':
-            w2_high = w['w1_end'][1]
-            w2_low = w['w2_end'][1]
-        else:
-            w2_low = w['w1_end'][1]
-            w2_high = w['w2_end'][1]
-
-        return {
-            'armed': True,
-            'dir': w['dir'],
-            'w2_high': float(w2_high),
-            'w2_low': float(w2_low),
-            'score': score,
-            'posterior': post,
-            'confidence': conf,
-            'frame': 'event',
-        }

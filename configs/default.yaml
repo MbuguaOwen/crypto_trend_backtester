@@ -6,8 +6,11 @@ symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 months: ["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07"]
 
-warmup:
-  min_1m_bars: 1000  # ensure indicators populated
+engine:
+  warmup:
+    # Start trading only after both gates are satisfied (no fallbacks):
+    min_1m_bars: 4000          # ~2.8 days; covers all windows
+    min_w2_candidates: 60      # enough to compute quantiles robustly
 
 regime:
   ts_mom:
@@ -41,15 +44,28 @@ waves:
     w2_posterior_min: 0.60
     w2_end_arm: 0.62
     max_age_impulse_bars: 110    # in event bars; additionally enforce ≥5h 1m coverage
+  adaptive:
+    enabled: true
+    # strict, quality-first; min/max ranges ONLY
+    vol_window_1m: 200
+    atr_mult_range: [1.6, 2.4]
+    atr_window_range: [180, 320]
+    thresholds_quantile: 0.85      # top 15% W2 quality
+    max_age_bars_range: [70, 140]
+    hysteresis_bars: 100
 
 entry:
   mode: "baseline"
   momentum:
     zscore_window: 20
-    zscore_k: 2.0
     min_body_dom: 0.6
-    range_atr_min: 1.5
     buffer_atr_mult: 0.30
+  adaptive:
+    enabled: true
+    # min/max ranges ONLY
+    zscore_k_range: [1.6, 2.6]
+    range_atr_min_range: [1.3, 1.8]
+    target_pass_rate: 0.08
 
 risk:
   atr:
@@ -58,14 +74,19 @@ risk:
     mode: "structure_or_atr"
     atr_mult: 5.0
   be:
-    trigger_r: 0.75
     buffer:
-      r_multiple: 0.02           # small > 0R to cover friction
+      r_multiple: 0.02
       fees_bps_round_trip: 7
       slippage_bps: 5
   tsl:
+    # multipliers controlled adaptively, but engine needs these fields present
     start_r: 1.4
     atr_mult: 3.6
+  adaptive:
+    enabled: true
+    be_trigger_r_range: [0.65, 0.90]
+    tsl_start_r_range: [1.2, 1.8]
+    tsl_atr_mult_range: [3.2, 4.5]
 
 position:
   qty_mode: "notional"  # "units" or "notional"
