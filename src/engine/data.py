@@ -2,6 +2,79 @@ import os
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+from typing import Tuple, Optional
+
+
+PRICE_ALIASES = ["price", "p", "last", "trade_price"]
+QTY_ALIASES   = ["qty", "quantity", "size", "amount", "vol", "volume", "q", "baseQty", "base_quantity"]
+QUOTE_ALIASES = ["quoteQty", "quote_quantity", "notional", "quote_amount"]
+
+
+def _find_first(df: pd.DataFrame, names) -> Optional[str]:
+    for n in names:
+        if n in df.columns:
+            return n
+        # also try case-insensitive match
+        hits = [c for c in df.columns if c.lower() == n.lower()]
+        if hits:
+            return hits[0]
+    return None
+
+
+def _normalize_tick_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df with guaranteed columns:
+      - 'timestamp' | 'ts' | 'time' (unchanged, handled elsewhere)
+      - 'price' (float)
+      - 'qty'   (float, base quantity)
+      - 'is_buyer_maker' (optional; if absent, fill False)
+    Derive qty from quote/notional when needed.
+    """
+    g = df.copy()
+
+    # locate price
+    price_col = _find_first(g, PRICE_ALIASES)
+    if price_col is None:
+        raise KeyError(f"Missing price column. Tried aliases: {PRICE_ALIASES}")
+    if price_col != "price":
+        g = g.rename(columns={price_col: "price"})
+
+    # locate qty; if missing, try derive from quote / amount
+    qty_col = _find_first(g, QTY_ALIASES)
+    if qty_col and qty_col != "qty":
+        g = g.rename(columns={qty_col: "qty"})
+
+    derived_count = 0
+    derived_from = None
+    if "qty" not in g.columns:
+        # try quote notional ÷ price
+        quote_col = _find_first(g, QUOTE_ALIASES)
+        if quote_col is not None:
+            # coerce to numeric
+            g["price"] = pd.to_numeric(g["price"], errors="coerce")
+            g[quote_col] = pd.to_numeric(g[quote_col], errors="coerce")
+            g["qty"] = g[quote_col] / g["price"]
+            derived_count = g["qty"].notna().sum()
+            derived_from = quote_col
+        else:
+            # last resort: treat each tick as size 1 (not ideal, but better than crashing)
+            g["qty"] = 1.0
+
+    # ensure numeric
+    g["price"] = pd.to_numeric(g["price"], errors="coerce")
+    g["qty"]   = pd.to_numeric(g["qty"], errors="coerce")
+
+    # optional flag
+    if "is_buyer_maker" not in g.columns:
+        g["is_buyer_maker"] = False
+
+    # drop rows that failed coercion
+    g = g.dropna(subset=["price", "qty"])
+
+    if derived_count:
+        print(f"[normalize] derived qty from '{derived_from}' for {derived_count} rows")
+
+    return g
 
 
 def _pick_ts_column(df: pd.DataFrame) -> str:
@@ -64,20 +137,26 @@ def _parse_ts(s: pd.Series) -> pd.DatetimeIndex:
 
 def ticks_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
     """
-    df_ticks columns: ['timestamp'|'ts'|'time','price','qty','is_buyer_maker'].
+    df_ticks columns may vary; we normalize to:
+      - timestamp/ts/time
+      - price, qty
     Returns tz-aware UTC 1m OHLCV with ['open','high','low','close','volume'].
     """
     df = df_ticks.copy()
 
-    # Robust timestamp parsing
+    # Robust timestamp parsing (existing helpers)
     ts_col = _pick_ts_column(df)
     df['ts'] = _parse_ts(df[ts_col])
 
+    # Normalize price/qty/etc.
+    df = _normalize_tick_columns(df)
+
+    # Set index and resample
     df = df.set_index('ts').sort_index()
 
-    # price*qty as turnover proxy; here 'volume' = sum(qty); you can also store notional
     ohlc = df['price'].resample('1min', label='right', closed='right').ohlc()
-    vol  = df['qty'].resample('1min', label='right', closed='right').sum().rename('volume')
+    vol  = df['qty'  ].resample('1min', label='right', closed='right').sum().rename('volume')
+
     out = pd.concat([ohlc, vol], axis=1).dropna()
     out.index = pd.DatetimeIndex(out.index, tz='UTC')
     return out
