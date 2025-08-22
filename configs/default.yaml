@@ -1,91 +1,104 @@
-
-# Minimal, non-duplicated config with strict adaptive defaults.
-symbols: ["BTCUSDT"]   #, "ETHUSDT", "SOLUSDT"
+# configs/default.yaml
+# WaveGate + Momentum Backtest (looser sweep baseline) — all thresholds in YAML
 
 paths:
   inputs_dir: "inputs"
   outputs_dir: "outputs"
 
-# January–March example; extend as needed.
-months: ["2025-01", "2025-02", "2025-03","2025-04", "2025-05", "2025-06", "2025-07"]
+symbols: ["BTCUSDT"]   # run one at a time while tuning; add ["ETHUSDT","SOLUSDT"] later
+
+# Months to backtest (UTC). Keep long enough to satisfy warmups and event coverage.
+months: ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06", "2025-07"]
 
 logging:
   progress: true
-  progress_stride: 200
+  progress_stride: 200    # bars per UI refresh
 
 engine:
   warmup:
-    min_1m_bars: 4000         # ~3 days (tunable)
-    min_w2_candidates: 60     # ensure quantiles are meaningful
+    min_1m_bars: 1200     # ~20h warmup to populate zscore/ATR/regime safely
+    min_w2_candidates: 25 # ensure WaveGate has enough W2 samples to set quantile thresholds
 
-# ---------- Macro Regime (TSMOM) ----------
+# -------- Regime (TSMOM) --------
 regime:
   ts_mom:
-    require_majority: 3
+    require_majority: 2    # need 2 TFs agreeing to avoid FLAT
     timeframes:
-      - { tf: "1min", lookback_closes: 30 }   # 30 min
-      - { tf: "5min",  lookback_closes: 20 }  # 100 min
-      - { tf: "15min", lookback_closes: 12 }  # 180 min
-      - { tf: "1h",    lookback_closes: 8 }   # 8 hours
+      - { tf: "1min",  lookback_closes: 30 }  # ~30 minutes
+      - { tf: "5min",  lookback_closes: 24 }  # ~2 hours
+      - { tf: "15min", lookback_closes: 16 }  # ~4 hours
 
-# ---------- Event-Time Waves (CUSUM + WaveGate) ----------
+# -------- Waves (CUSUM event-time bars + ZigZag/Arm) --------
 waves:
   cusum:
-    atr_window_1m: 200
-    k_factor: 0.35
+    atr_window_1m: 200     # κ baseline from 1m ATR
+    k_factor: 0.35         # κ = ATR * k_factor, clamped to [k_min, k_max]
     k_min: 0.25
     k_max: 0.60
 
+  zigzag:
+    max_lookback_bars: 1200  # event bars considered in WaveGate
+
   adaptive:
     enabled: true
-    vol_window_1m: 200
-    atr_mult_range: [2.8, 7.5]
-    atr_window_range: [180, 320]
-    thresholds_quantile: 0.85
-    max_age_bars_range: [70, 140]
+    vol_window_1m: 600        # percentile window for vol state
 
-  zigzag:
-    max_lookback_bars: 1500
+    # Event-ATR smoothing & swing sensitivity (loosen for more W2 arms)
+    atr_window_range: [140, 360]      # slightly longer than loose → fewer flimsy swings
+    atr_mult_range:   [1.30, 2.30]    # a hair higher than loose → cleaner W2s
 
-  fixed:
-    atr_mult0: 2.8
-    atr_window: 220
-    w2_end_arm: 0.64
-    w2_post_min: 0.60
-    min_conf: 0.60
-    max_age_bars: 110
+    # Quantile to derive live thresholds from recent W2 stats
+    thresholds_quantile: 0.55         # just above median to reduce bad arms
 
-# ---------- Entry Trigger (1m momentum bar) ----------
+    # Hints used only before enough live W2 samples exist (explicit to avoid any hardcoded defaults)
+    w2_end_arm_hint: 0.58             # slightly firmer than loose (0.55)
+    w2_post_min_hint: 0.56
+    min_conf_hint:    0.52
+
+    # Clamp for W2 age (event bars) — adapts from observed median; keep reasonable ceiling
+    max_age_bars_range: [60, 240]     # allow slightly older W2s to pass when structure is clean
+
+# -------- Entry (Momentum Power Bar) --------
 entry:
   momentum:
-    zscore_window: 20
-    min_body_dom: 0.60
+    zscore_window: 20                 # z-score window on 1m log returns
+    min_body_dom: 0.50                # body dominance threshold (|close-open|/(high-low))
+
   adaptive:
     enabled: true
-    zscore_k_range: [1.7, 3.5]
-    range_atr_min_range: [1.5, 4.5]
-  fixed:
-    zscore_k: 2.0
-    range_atr_min: 1.5
+    # Looser → more triggers; tied to vol percentile
+    zscore_k_range:      [0.90, 1.30]   # firmer than loose [0.80,1.20] to cut noisy pops
+    range_atr_min_range: [0.90, 1.10]   # require a touch more expansion than loose
 
-# ---------- Risk Management ----------
+    # (No hardcoded fallbacks in code; these ranges fully determine trigger thresholds.)
+
+# -------- Risk (BE / TSL / SL) --------
 risk:
   atr:
-    window: 14
+    window: 50                        # ATR for risk stop logic
+
   sl:
-    mode: "atr"   # structural W2 or ATR-based
-    atr_mult: 15.0
+    mode: "ATR_or_Structure"          # code uses structure vs ATR combo; keep explicit
+    atr_mult: 3.0                     # WIDER initial stop (2.2 → 3.0) to reduce early SLs & let TSL work
+
   be:
     buffer:
-      r_multiple: 0.02            # cover costs if very tight
-      fees_bps_round_trip: 8.0
-      slippage_bps: 6.0
+      r_multiple: 0.05                # BE buffer floor as fraction of r0 (prevents nicking)
+      fees_bps_round_trip: 8.0        # model friction explicitly
+      slippage_bps: 5.0
+
   adaptive:
     enabled: true
-    be_trigger_r_range: [0.4, 0.8]
-    tsl_start_r_range: [1.0, 4.0]
-    tsl_atr_mult_range: [5.0, 15.0]
-  fixed:
-    be_trigger_r: 0.50
-    tsl_start_r: 1.0
-    tsl_atr_mult: 10.0
+    # Keep BE useful but not too grabby; start TSL around 1R; trail not too loose
+    be_trigger_r_range: [0.45, 0.65]  # still ~0.5R; lets many trades de-risk early
+    tsl_start_r_range:  [0.90, 1.20]  # trail engages ~1R so runners can get captured
+    tsl_atr_mult_range: [1.80, 2.40]  # balanced trailing band (tight enough to realize gains)
+
+# ---- Notes for sweep control (optional) ----
+# You can create multiple YAMLs (e.g., default_loose.yaml, default_mid.yaml) that vary only these blocks:
+# - waves.adaptive.{atr_window_range, atr_mult_range, thresholds_quantile, hints}
+# - entry.adaptive.{zscore_k_range, range_atr_min_range}
+# - risk.adaptive.{be_trigger_r_range, tsl_start_r_range, tsl_atr_mult_range}
+#
+# Example commands:
+#   python -m run_backtest --config configs/default.yaml --workers 1

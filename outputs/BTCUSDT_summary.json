@@ -1,0 +1,18 @@
+{
+  "symbol": "BTCUSDT",
+  "trades": 493,
+  "blockers": {
+    "regime_flat": 9703,
+    "wave_not_armed": 286461,
+    "trigger_fail": 5256
+  },
+  "win_rate": 0.6288032454361054,
+  "avg_R": 14069731401.436975,
+  "median_R": 1.067509615561889,
+  "sum_R": 6936377580908.429,
+  "exits": {
+    "SL": 211,
+    "BE": 166,
+    "TSL": 116
+  }
+}

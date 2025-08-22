@@ -1,29 +1,131 @@
 # run_backtest.py
-
 import os
 import argparse
 import concurrent.futures
-import json
+import multiprocessing as mp
+import queue as pyqueue
+import threading
+import time
+from typing import Any, Dict, List
 import yaml
 from tqdm import tqdm
 
+# ------ Progress message structure ------
+# {'type': 'init', 'symbol': str, 'total': int}
+# {'type': 'tick', 'symbol': str, 'done': int}
+# {'type': 'done', 'symbol': str}
+# {'type': 'log',  'msg': str}
 
-# top-level (picklable) progress printer for single-worker mode
-def progress_printer(symbol: str, done: int, total: int, bar_dict={}):
-    if symbol not in bar_dict:
-        # leave=True so bars persist after completion
-        bar_dict[symbol] = tqdm(total=total, desc=symbol, ncols=100, position=len(bar_dict), leave=True)
-    bar = bar_dict[symbol]
-    bar.n = done
-    bar.refresh()
+
+def _progress_listener(q: Any, stop_evt: threading.Event) -> None:
+    """
+    Runs in the MAIN process. Consumes progress messages from workers and updates tqdm bars.
+    'q' is a Manager().Queue() or mp.Queue(); we keep it untyped (Any) for Windows compatibility.
+    """
+    bars: Dict[str, tqdm] = {}
+    order: List[str] = []  # deterministic ordering of bars
+    overall: tqdm | None = None
+    totals: Dict[str, int] = {}
+    dones: Dict[str, int] = {}
+
+    last_refresh = 0.0
+    REFRESH_EVERY = 0.05
+
+    while not stop_evt.is_set():
+        try:
+            msg = q.get(timeout=0.1)
+        except pyqueue.Empty:
+            msg = None
+
+        if msg is None:
+            now = time.time()
+            if overall and (now - last_refresh) >= REFRESH_EVERY:
+                for b in bars.values():
+                    b.refresh()
+                overall.refresh()
+                last_refresh = now
+            continue
+
+        t = msg.get('type')
+        if t == 'init':
+            sym = msg['symbol']
+            total = int(msg['total'])
+            totals[sym] = total
+            dones.setdefault(sym, 0)
+            if sym not in bars:
+                position = len(order) + 1  # keep row 0 for the ALL bar
+                bars[sym] = tqdm(total=total, desc=sym, ncols=100, position=position, leave=True)
+                order.append(sym)
+            else:
+                bars[sym].total = total
+
+            if overall is None:
+                overall = tqdm(total=sum(totals.values()), desc="ALL", ncols=100, position=0, leave=True)
+            else:
+                overall.total = sum(totals.values())
+
+        elif t == 'tick':
+            sym = msg['symbol']
+            done = int(msg['done'])
+            if sym in bars:
+                bars[sym].n = done
+            dones[sym] = done
+            if overall:
+                overall.n = sum(dones.values())
+
+        elif t == 'done':
+            sym = msg['symbol']
+            if sym in bars:
+                bars[sym].n = bars[sym].total
+                bars[sym].refresh()
+
+        elif t == 'log':
+            tqdm.write(str(msg.get('msg', '')))
+
+        now = time.time()
+        if overall and (now - last_refresh) >= REFRESH_EVERY:
+            for b in bars.values():
+                b.refresh()
+            overall.refresh()
+            last_refresh = now
+
+    # graceful close
+    try:
+        for b in bars.values():
+            b.close()
+        if overall:
+            overall.close()
+    except Exception:
+        pass
 
 
 def _worker(args):
-    cfg, symbol, use_progress = args
+    """
+    Runs in a child process.
+    Sends progress messages to the parent via Queue.
+    """
+    cfg, symbol, q = args
     from src.engine.backtest import run_for_symbol
-    # Only create a local hook in the child when single-worker; never pickle it
-    hook = (lambda s, d, t: progress_printer(s, d, t)) if use_progress else None
-    return run_for_symbol(cfg, symbol, progress_hook=hook)
+
+    def hook(sym: str, done: int, total: int):
+        try:
+            q.put({'type': 'init', 'symbol': sym, 'total': int(total)})
+            q.put({'type': 'tick', 'symbol': sym, 'done': int(done)})
+        except Exception:
+            pass
+
+    try:
+        q.put({'type': 'log', 'msg': f"Starting {symbol}..."})
+    except Exception:
+        pass
+
+    res = run_for_symbol(cfg, symbol, progress_hook=hook)
+
+    try:
+        q.put({'type': 'done', 'symbol': symbol})
+    except Exception:
+        pass
+    return res
 
 
 def main():
@@ -32,11 +134,10 @@ def main():
     ap.add_argument("--workers", type=int, default=0, help="Number of processes (0 = all cores)")
     args = ap.parse_args()
 
-    # Load config once in parent
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
 
-    symbols = list(cfg.get("symbols", []))
+    symbols = list(cfg.get('symbols', []))
     if not symbols:
         print("No symbols specified in config")
         return
@@ -44,36 +145,33 @@ def main():
     max_workers = os.cpu_count() or 1
     workers = max_workers if args.workers in (None, 0) else max(1, args.workers)
 
-    use_progress = bool(cfg['logging']['progress']) and workers == 1
+    # Windows-safe spawn context + Manager Queue
+    mp_ctx = mp.get_context("spawn")
+    manager = mp_ctx.Manager()
+    q = manager.Queue(maxsize=10000)
+
+    stop_evt = threading.Event()
+    listener_thread = threading.Thread(target=_progress_listener, args=(q, stop_evt), daemon=True)
+    listener_thread.start()
 
     summaries = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_worker, (cfg, sym, use_progress)) for sym in symbols]
-        all_bar = tqdm(total=len(futs), desc="ALL", ncols=100, position=0, leave=True)
-        for fut in concurrent.futures.as_completed(futs):
-            try:
-                res = fut.result()
-            except Exception as e:
-                res = {"symbol": "UNKNOWN", "error": str(e)}
-            summaries.append(res)
-            all_bar.update(1)
-        all_bar.close()
+    try:
+        # NOTE: pass mp_context for Windows Python 3.8+ compatibility
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as ex:
+            futs = [ex.submit(_worker, (cfg, sym, q)) for sym in symbols]
+            for fut in concurrent.futures.as_completed(futs):
+                try:
+                    summaries.append(fut.result())
+                except Exception as e:
+                    summaries.append({'symbol': 'UNKNOWN', 'error': str(e)})
+    finally:
+        stop_evt.set()
+        listener_thread.join(timeout=1.0)
 
-    # Print per-symbol summaries (also written by backtest.py individually)
     for s in summaries:
         print(s)
 
-    # Write combined summary alongside other outputs
-    out_dir = cfg["paths"]["outputs_dir"]
-    os.makedirs(out_dir, exist_ok=True)
-    combined_path = os.path.join(out_dir, "combined_summary.json")
-    with open(combined_path, "w") as f:
-        json.dump(summaries, f, indent=2)
-
-    print(f"\nCombined summary written to: {combined_path}")
-
 
 if __name__ == "__main__":
-    # Windows uses 'spawn': ensure all top-levels are picklable (they are).
-    # This also works on POSIX.
+    mp.freeze_support()
     main()
