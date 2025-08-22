@@ -56,8 +56,20 @@ class AdaptiveController:
     # ---- Waves ----
     def waves_params(self, i_bar: int) -> WaveParams:
         ad = self.cfg['waves']['adaptive']
+        if not bool(ad.get('enabled', True)):
+            fx = self.cfg['waves'].get('fixed', {})
+            return WaveParams(
+                float(fx.get('atr_mult0', 1.8)),
+                int(fx.get('atr_window', 220)),
+                float(fx.get('w2_end_arm', 0.64)),
+                float(fx.get('w2_post_min', 0.60)),
+                float(fx.get('min_conf', 0.60)),
+                int(fx.get('max_age_bars', 110)),
+            )
         vol_win = int(ad['vol_window_1m'])
-        atr_norm = (self.atr1m / self.atr1m.rolling(vol_win).median()).fillna(method='ffill')
+        atr_norm = (
+    self.atr1m / self.atr1m.rolling(vol_win, min_periods=1).median()
+).replace([np.inf, -np.inf], np.nan).ffill()
         vol_pctl = pct_rank(atr_norm.iloc[:i_bar + 1], vol_win)
 
         atr_mult0 = lerp(ad['atr_mult_range'][0], ad['atr_mult_range'][1], vol_pctl)
@@ -77,8 +89,16 @@ class AdaptiveController:
     # ---- Trigger ----
     def trigger_params(self, i_bar: int) -> dict:
         ad = self.cfg['entry']['adaptive']
+        if not bool(ad.get('enabled', True)):
+            fx = self.cfg['entry'].get('fixed', {})
+            return {
+                'zscore_k': float(fx.get('zscore_k', 2.0)),
+                'range_atr_min': float(fx.get('range_atr_min', 1.5)),
+            }
         win = int(self.cfg['waves']['adaptive']['vol_window_1m'])
-        atr_norm = (self.atr1m / self.atr1m.rolling(win).median()).fillna(method='ffill')
+        atr_norm = (
+    self.atr1m / self.atr1m.rolling(win, min_periods=1).median()
+).replace([np.inf, -np.inf], np.nan).ffill()
         vol_pctl = pct_rank(atr_norm.iloc[:i_bar + 1], win)
         return {
             'zscore_k': float(lerp(ad['zscore_k_range'][0], ad['zscore_k_range'][1], vol_pctl)),
@@ -88,8 +108,17 @@ class AdaptiveController:
     # ---- Risk ----
     def risk_params(self, i_bar: int) -> dict:
         ad = self.cfg['risk']['adaptive']
+        if not bool(ad.get('enabled', True)):
+            fx = self.cfg['risk'].get('fixed', {})
+            return {
+                'be_trigger_r': float(fx.get('be_trigger_r', 0.75)),
+                'tsl_start_r': float(fx.get('tsl_start_r', 1.4)),
+                'tsl_atr_mult': float(fx.get('tsl_atr_mult', 3.6)),
+            }
         win = int(self.cfg['waves']['adaptive']['vol_window_1m'])
-        atr_norm = (self.atr1m / self.atr1m.rolling(win).median()).fillna(method='ffill')
+        atr_norm = (
+    self.atr1m / self.atr1m.rolling(win, min_periods=1).median()
+).replace([np.inf, -np.inf], np.nan).ffill()
         vov = atr_norm.rolling(win // 2).std().fillna(0.0)
         t = pct_rank(vov.iloc[:i_bar + 1], win)
         return {

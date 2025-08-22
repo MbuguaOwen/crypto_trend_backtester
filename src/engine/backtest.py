@@ -54,12 +54,17 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
 
     trades = []
     trade = None
-    stride = int(cfg['logging'].get('progress_stride', 50))
+    stride = int(cfg['logging'].get('progress_stride', 200))
     total_bars = len(df1m) - start_i
 
     blockers = {'regime_flat': 0, 'wave_not_armed': 0, 'trigger_fail': 0}
 
     for i in range(start_i, len(df1m)):
+        if progress_hook is not None and ((i - start_i) % stride == 0 or (i + 1) == len(df1m)):
+            try:
+                progress_hook(symbol, i - start_i + 1, total_bars)
+            except Exception:
+                pass
         ts = df1m.index[i]
 
         if trade is not None and not trade.get('exit'):

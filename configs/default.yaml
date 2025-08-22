@@ -1,99 +1,91 @@
+
+# Minimal, non-duplicated config with strict adaptive defaults.
+symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
 paths:
   inputs_dir: "inputs"
   outputs_dir: "outputs"
 
-symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+# January–March example; extend as needed.
+months: ["2025-01", "2025-02", "2025-03","2025-04", "2025-05", "2025-06", "2025-07"]
 
-months: ["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07"]
+logging:
+  progress: true
+  progress_stride: 200
 
 engine:
   warmup:
-    # Start trading only after both gates are satisfied (no fallbacks):
-    min_1m_bars: 4000          # ~2.8 days; covers all windows
-    min_w2_candidates: 60      # enough to compute quantiles robustly
+    min_1m_bars: 4000         # ~3 days (tunable)
+    min_w2_candidates: 60     # ensure quantiles are meaningful
 
+# ---------- Macro Regime (TSMOM) ----------
 regime:
   ts_mom:
-    require_majority: 4          # 4 of 5
+    require_majority: 3
     timeframes:
-      - tf: "1min"   # 1-minute
-        lookback_closes: 30
-      - tf: "5min"
-        lookback_closes: 20
-      - tf: "15min"
-        lookback_closes: 12
-      - tf: "1h"
-        lookback_closes: 8
-      - tf: "5h"     # NEW timeframe
-        lookback_closes: 3
+      - { tf: "1min", lookback_closes: 30 }   # 30 min
+      - { tf: "5min",  lookback_closes: 20 }  # 100 min
+      - { tf: "15min", lookback_closes: 12 }  # 180 min
+      - { tf: "1h",    lookback_closes: 8 }   # 8 hours
 
+# ---------- Event-Time Waves (CUSUM + WaveGate) ----------
 waves:
-  enabled: true
-  timeframe: "event"             # "event" uses CUSUM bars
   cusum:
-    k_factor: 0.45               # κ = k_factor * ATR_1m(200)
-    k_min: 0.35
-    k_max: 0.70
     atr_window_1m: 200
-  zigzag:
-    atr_window: 220
-    atr_mults: [1.8, 3.0, 5.0]
-    max_lookback_bars: 2000      # count of event bars (enough; 2k events)
-  thresholds:
-    min_confidence: 0.60
-    w2_posterior_min: 0.60
-    w2_end_arm: 0.62
-    max_age_impulse_bars: 110    # in event bars; additionally enforce ≥5h 1m coverage
+    k_factor: 0.35
+    k_min: 0.25
+    k_max: 0.60
+
   adaptive:
     enabled: true
-    # strict, quality-first; min/max ranges ONLY
     vol_window_1m: 200
-    atr_mult_range: [1.6, 2.4]
+    atr_mult_range: [2.8, 7.5]
     atr_window_range: [180, 320]
-    thresholds_quantile: 0.85      # top 15% W2 quality
+    thresholds_quantile: 0.85
     max_age_bars_range: [70, 140]
-    hysteresis_bars: 100
 
+  zigzag:
+    max_lookback_bars: 1500
+
+  fixed:
+    atr_mult0: 2.8
+    atr_window: 220
+    w2_end_arm: 0.64
+    w2_post_min: 0.60
+    min_conf: 0.60
+    max_age_bars: 110
+
+# ---------- Entry Trigger (1m momentum bar) ----------
 entry:
-  mode: "baseline"
   momentum:
     zscore_window: 20
-    min_body_dom: 0.6
-    buffer_atr_mult: 0.30
+    min_body_dom: 0.60
   adaptive:
     enabled: true
-    # min/max ranges ONLY
-    zscore_k_range: [1.6, 2.6]
-    range_atr_min_range: [1.3, 1.8]
-    target_pass_rate: 0.08
+    zscore_k_range: [1.7, 3.5]
+    range_atr_min_range: [1.5, 4.5]
+  fixed:
+    zscore_k: 2.0
+    range_atr_min: 1.5
 
+# ---------- Risk Management ----------
 risk:
   atr:
     window: 14
   sl:
-    mode: "structure_or_atr"
-    atr_mult: 5.0
+    mode: "atr"   # structural W2 or ATR-based
+    atr_mult: 15.0
   be:
     buffer:
-      r_multiple: 0.02
-      fees_bps_round_trip: 7
-      slippage_bps: 5
-  tsl:
-    # multipliers controlled adaptively, but engine needs these fields present
-    start_r: 1.4
-    atr_mult: 3.6
+      r_multiple: 0.02            # cover costs if very tight
+      fees_bps_round_trip: 8.0
+      slippage_bps: 6.0
   adaptive:
     enabled: true
-    be_trigger_r_range: [0.65, 0.90]
-    tsl_start_r_range: [1.2, 1.8]
-    tsl_atr_mult_range: [3.2, 4.5]
-
-position:
-  qty_mode: "notional"  # "units" or "notional"
-  notional_usd: 100      # used for P&L scaling; no brokerage here
-
-logging:
-  progress: true
-  debug_blockers: true
-  progress_stride: 50     # update hook every N bars
-  overall_bar: true       # show combined progress bar across symbols
+    be_trigger_r_range: [0.4, 0.8]
+    tsl_start_r_range: [1.0, 4.0]
+    tsl_atr_mult_range: [5.0, 15.0]
+  fixed:
+    be_trigger_r: 0.50
+    tsl_start_r: 1.0
+    tsl_atr_mult: 10.0
