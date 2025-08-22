@@ -51,3 +51,37 @@ def donchian_high(df: pd.DataFrame, lookback: int) -> pd.Series:
 
 def donchian_low(df: pd.DataFrame, lookback: int) -> pd.Series:
     return df['low'].rolling(lookback, min_periods=1).min()
+
+
+def atr_vec(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int) -> np.ndarray:
+    """Vectorized ATR (EWMA of true range)."""
+    prev_close = np.concatenate(([close[0]], close[:-1]))
+    tr = np.maximum.reduce([
+        high - low,
+        np.abs(high - prev_close),
+        np.abs(low - prev_close),
+    ])
+    return pd.Series(tr).ewm(alpha=1 / window, adjust=False).mean().to_numpy()
+
+
+def zscore_logret_vec(close: np.ndarray, win: int) -> np.ndarray:
+    prev = np.concatenate(([close[0]], close[:-1]))
+    lr = np.log(close / prev)
+    lr[0] = 0.0
+    mu = pd.Series(lr).rolling(win, min_periods=1).mean().to_numpy()
+    sd = pd.Series(lr).rolling(win, min_periods=1).std(ddof=0).to_numpy()
+    z = np.where(sd > 0, (lr - mu) / sd, 0.0)
+    return z
+
+
+def body_dom_vec(open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
+    rng = np.maximum(1e-9, high - low)
+    return np.abs((close - open_) / rng)
+
+
+def true_range_vec(high: np.ndarray, low: np.ndarray, prev_close: np.ndarray) -> np.ndarray:
+    return np.maximum.reduce([
+        high - low,
+        np.abs(high - prev_close),
+        np.abs(low - prev_close),
+    ])

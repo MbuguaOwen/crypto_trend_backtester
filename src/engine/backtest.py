@@ -1,8 +1,9 @@
 
-import os, json, math, yaml
+import os, json, yaml
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
 
 from .data import load_symbol_1m
 from .regime import TSMOMRegime, FLAT
@@ -10,7 +11,7 @@ from .waves import WaveGate
 from .trigger import momentum_ignition
 from .risk import RiskCfg, initial_stop, update_stops, check_exit
 
-from .utils import atr, resample_ohlcv
+from .utils import resample_ohlcv, atr_vec, zscore_logret_vec, body_dom_vec, true_range_vec
 
 def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     inputs_dir = cfg['paths']['inputs_dir']
@@ -22,11 +23,12 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     df1m = load_symbol_1m(inputs_dir, symbol, months, progress=cfg['logging']['progress'])
     if len(df1m) < warmup + 500:
         raise RuntimeError("Insufficient 1m bars after loading.")
-    # Precompute resampled frames once (no look-ahead; we slice by ts in-loop)
-    df5  = resample_ohlcv(df1m, '5min')
-    atr5 = atr(df5, int(cfg['waves']['zigzag']['atr_window']))
+
+    df5 = resample_ohlcv(df1m, '5min')
+    atr5 = pd.Series(atr_vec(df5['high'].to_numpy(), df5['low'].to_numpy(), df5['close'].to_numpy(),
+                              int(cfg['waves']['zigzag']['atr_window'])), index=df5.index)
     regime = TSMOMRegime(cfg, df1m)
-    waves = WaveGate(cfg)
+    waves = WaveGate(cfg, df5, atr5)
 
     risk_cfg = RiskCfg(
         atr_window=int(cfg['risk']['atr']['window']),
@@ -37,69 +39,81 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
         tsl_atr_mult=float(cfg['risk']['tsl']['atr_mult'])
     )
 
+    close = df1m['close'].to_numpy()
+    high = df1m['high'].to_numpy()
+    low = df1m['low'].to_numpy()
+    open_ = df1m['open'].to_numpy()
+    prev_close = np.concatenate(([close[0]], close[:-1]))
+    atr_arr = atr_vec(high, low, close, risk_cfg.atr_window)
+    zret = zscore_logret_vec(close, int(cfg['entry']['momentum']['zscore_window']))
+    body_dom_arr = body_dom_vec(open_, high, low, close)
+    tr_arr = true_range_vec(high, low, prev_close)
+    tr_over_atr = tr_arr / np.maximum(1e-9, atr_arr)
+    regime_vec = regime.regime_vec
+    idx = df1m.index
+
+    buf = float(cfg['entry']['breakout']['buffer_atr_mult'])
+    z_k = float(cfg['entry']['momentum']['zscore_k'])
+    min_body = float(cfg['entry']['momentum']['min_body_dom'])
+    range_min = float(cfg['entry']['momentum']['range_atr_min'])
+
     rows = []
     trade = None
-    # Precompute ATR for speed
-    atr_series = atr(df1m, risk_cfg.atr_window)
 
     iterator = range(warmup, len(df1m))
     stride = int(cfg['logging'].get('progress_stride', 50))
     total_bars = len(df1m) - warmup
 
-    blockers = {'regime_flat':0, 'wave_not_armed':0, 'trigger_fail':0}
+    blockers = {'regime_flat': 0, 'wave_not_armed': 0, 'trigger_fail': 0}
     for i in iterator:
-        row = df1m.iloc[i]
-        ts = row.name
-        # external progress hook (throttled)
-        if progress_hook is not None and (i == len(df1m)-1 or ((i - warmup) % max(1, stride) == 0)):
+        ts = idx[i]
+        price = close[i]
+        h = high[i]
+        l = low[i]
+
+        if progress_hook is not None and (i == len(df1m) - 1 or ((i - warmup) % max(1, stride) == 0)):
             try:
                 progress_hook(symbol, i - warmup, total_bars)
             except Exception:
                 pass
 
-        # Manage open trade
         if trade is not None and not trade.get('exit'):
-            update_stops(trade, row, atr_series.iloc[i], risk_cfg)
-            check_exit(trade, row)
+            update_stops(trade, price, atr_arr[i], risk_cfg)
+            check_exit(trade, h, l)
             if trade.get('exit'):
-                # R computation
                 r0 = trade['r0']
                 if trade['direction'] == 'LONG':
-                    r_realized = (trade['exit'] - trade['entry'])/max(1e-9, r0)
+                    r_realized = (trade['exit'] - trade['entry']) / max(1e-9, r0)
                 else:
-                    r_realized = (trade['entry'] - trade['exit'])/max(1e-9, r0)
+                    r_realized = (trade['entry'] - trade['exit']) / max(1e-9, r0)
                 trade['r_realized'] = float(r_realized)
                 rows.append(trade)
                 trade = None
-            # continue to next bar even if exit, but allow new entry same bar? We'll skip.
             continue
 
-        # No open trade -> check gates and trigger
-        side = regime.decide_at(ts)
+        side = regime_vec[i]
         if side == FLAT:
             blockers['regime_flat'] += 1
             continue
 
-        wave_state = waves.compute_at(df5, atr5, ts)
+        wave_state = waves.compute_at(ts)
         if (not wave_state.get('armed')) or wave_state.get('dir') != side:
             blockers['wave_not_armed'] += 1
             continue
 
-        # Use df1m up-to-ts for trigger calcs (causal)
-        window = df1m.iloc[:i+1]
-        trig = momentum_ignition(window, wave_state, side, cfg)
+        trig = momentum_ignition(i, wave_state, side, close, atr_arr, zret, body_dom_arr,
+                                 tr_over_atr, buf, z_k, min_body, range_min)
         if not trig:
             blockers['trigger_fail'] += 1
             continue
 
-        # Open trade at close
-        entry = row['close']
-        stop0 = initial_stop(entry, trig['direction'], wave_state, window, risk_cfg)
-        r0 = entry - stop0 if trig['direction']=='LONG' else stop0 - entry
+        entry = price
+        stop0 = initial_stop(entry, trig['direction'], wave_state, atr_arr[i], risk_cfg)
+        r0 = entry - stop0 if trig['direction'] == 'LONG' else stop0 - entry
         r0 = max(1e-9, r0)
         trade = {
             'symbol': symbol,
-            'time': row.name.isoformat(),
+            'time': ts.isoformat(),
             'direction': trig['direction'],
             'entry': float(entry),
             'stop': float(stop0),
@@ -113,29 +127,26 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             'be_price': float(entry),
         }
 
-    # if trade still open, close at last
     if trade is not None and not trade.get('exit'):
-        last = df1m.iloc[-1]
-        trade['exit'] = float(last['close'])
+        last = len(df1m) - 1
+        trade['exit'] = float(close[last])
         trade['exit_reason'] = 'EOD'
         if trade['direction'] == 'LONG':
-            r_realized = (trade['exit'] - trade['entry'])/max(1e-9, trade['r0'])
+            r_realized = (trade['exit'] - trade['entry']) / max(1e-9, trade['r0'])
         else:
-            r_realized = (trade['entry'] - trade['exit'])/max(1e-9, trade['r0'])
+            r_realized = (trade['entry'] - trade['exit']) / max(1e-9, trade['r0'])
         trade['r_realized'] = float(r_realized)
         rows.append(trade)
 
-    # Results
     trades = pd.DataFrame(rows)
     out_trades = os.path.join(outputs_dir, f"{symbol}_trades.csv")
     trades.to_csv(out_trades, index=False)
 
-    summary = {}
     if not trades.empty:
         summary = {
             'symbol': symbol,
             'trades': len(trades),
-            'win_rate': float((trades['r_realized']>0).mean()),
+            'win_rate': float((trades['r_realized'] > 0).mean()),
             'avg_R': float(trades['r_realized'].mean()),
             'median_R': float(trades['r_realized'].median()),
             'sum_R': float(trades['r_realized'].sum()),
@@ -151,16 +162,16 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     return summary
 
 def run_all(config_path: str, progress_hook=None):
-    with open(config_path,'r') as f:
+    with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     summaries = []
-    for sym in cfg['symbols']:
-        try:
-            s = run_for_symbol(cfg, sym, progress_hook=progress_hook)
-        except Exception as e:
-            s = {'symbol': sym, 'error': str(e)}
-        summaries.append(s)
-    # write combined
+    with ProcessPoolExecutor() as ex:
+        futures = {ex.submit(run_for_symbol, cfg, sym, progress_hook): sym for sym in cfg['symbols']}
+        for fut, sym in futures.items():
+            try:
+                summaries.append(fut.result())
+            except Exception as e:
+                summaries.append({'symbol': sym, 'error': str(e)})
     with open(os.path.join(cfg['paths']['outputs_dir'], "combined_summary.json"), 'w') as f:
         json.dump(summaries, f, indent=2)
     print("Done. Summaries:", summaries)
