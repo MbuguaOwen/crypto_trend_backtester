@@ -53,6 +53,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
     assert ac.ready(start_i, seen), "Warm-start gates not satisfied; increase warmup or data length."
 
     trades = []
+    trade_id = 0
     trade = None
     stride = int(cfg['logging'].get('progress_stride', 200))
     total_bars = len(df1m) - start_i
@@ -81,6 +82,16 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
                 else:
                     r_realized = (trade['entry'] - trade['exit']) / max(1e-9, r0)
                 trade['r_realized'] = float(r_realized)
+                er = trade.get('exit_reason', 'SL')
+                trade['r_tsl'] = float(r_realized) if er == 'TSL' else 0.0
+                trade['r_be'] = float(r_realized) if er == 'BE' else 0.0
+                trade['r_sl'] = float(r_realized) if er == 'SL' else 0.0
+                logs_dir = os.path.join(outputs_dir, 'logs')
+                os.makedirs(logs_dir, exist_ok=True)
+                st = trade.get('stop_trace', [])
+                if st:
+                    import pandas as _pd
+                    _pd.DataFrame(st).to_csv(os.path.join(logs_dir, f"{symbol}_trade_{trade.get('id','NA')}_stoptrace.csv"), index=False)
                 trades.append(trade)
                 trade = None
             continue
@@ -117,6 +128,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
         trade = {
             'symbol': symbol,
             'time': ts.isoformat(),
+            'id': int(trade_id),
             'direction': direction,
             'entry': float(entry),
             'stop': float(stop0),
@@ -135,7 +147,7 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
                 'risk': risk.thresholds(i),
             },
         }
-
+        trade_id += 1
     if trade is not None and not trade.get('exit'):
         last = iloc[-1]
         trade['exit'] = float(last['close'])
@@ -145,9 +157,23 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
         else:
             r_realized = (trade['entry'] - trade['exit']) / max(1e-9, trade['r0'])
         trade['r_realized'] = float(r_realized)
+        er = trade.get('exit_reason', 'SL')
+        trade['r_tsl'] = float(r_realized) if er == 'TSL' else 0.0
+        trade['r_be'] = float(r_realized) if er == 'BE' else 0.0
+        trade['r_sl'] = float(r_realized) if er == 'SL' else 0.0
+        logs_dir = os.path.join(outputs_dir, 'logs')
+        os.makedirs(logs_dir, exist_ok=True)
+        st = trade.get('stop_trace', [])
+        if st:
+            import pandas as _pd
+            _pd.DataFrame(st).to_csv(os.path.join(logs_dir, f"{symbol}_trade_{trade.get('id','NA')}_stoptrace.csv"), index=False)
         trades.append(trade)
 
     trades_df = pd.DataFrame(trades)
+    if not trades_df.empty:
+        for col in ('r_tsl', 'r_be', 'r_sl'):
+            if col not in trades_df.columns:
+                trades_df[col] = 0.0
     trades_df.to_csv(os.path.join(outputs_dir, f"{symbol}_trades.csv"), index=False)
 
     summary = {'symbol': symbol, 'trades': len(trades_df), 'blockers': blockers}
