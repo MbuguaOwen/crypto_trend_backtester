@@ -43,6 +43,13 @@ class RiskManager:
             trade['be_price'] = trade.get('entry')
         if 'be_floor' not in trade:
             trade['be_floor'] = trade.get('stop')
+        # stop trace init
+        if 'stop_trace' not in trade:
+            trade['stop_trace'] = []
+        if 'last_logged_stop' not in trade:
+            trade['last_logged_stop'] = float(trade.get('stop', trade.get('entry', 0.0)))
+        if 'last_logged_mode' not in trade:
+            trade['last_logged_mode'] = str(trade.get('stop_mode', 'INIT'))
 
     def update_trade(self, trade: dict, row, i_bar: int):
         if trade.get('exit'):
@@ -102,6 +109,26 @@ class RiskManager:
                     trade['stop'] = new_stop
                 trade['tsl_active'] = True
                 trade['stop_mode'] = 'TSL'
+
+        # ---- Append stop trace on change of stop or mode ----
+        mode_now = str(trade.get('stop_mode', 'INIT'))
+        stop_now = float(trade.get('stop', entry))
+        changed_stop = abs(stop_now - float(trade.get('last_logged_stop', stop_now))) > 1e-9
+        changed_mode = mode_now != trade.get('last_logged_mode')
+        if changed_stop or changed_mode:
+            ts = getattr(row, 'name', None)
+            ts_iso = ts.isoformat() if ts is not None else ''
+            trade['stop_trace'].append({
+                'time': ts_iso,
+                'price': float(price),
+                'stop': float(stop_now),
+                'mode': mode_now,
+                'r': float(r),
+                'tsl_active': bool(trade.get('tsl_active', False)),
+                'be_armed': bool(trade.get('be_armed', False)),
+            })
+            trade['last_logged_stop'] = stop_now
+            trade['last_logged_mode'] = mode_now
 
     def check_exit(self, trade: dict, row):
         if trade.get('exit'):

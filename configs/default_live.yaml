@@ -1,26 +1,19 @@
-# configs/default.yaml
-# WaveGate + Momentum Backtest (looser sweep baseline) — all thresholds in YAML
+# configs/default_live.yaml 
+# WaveGate + Momentum Backtest (LIVE) — aligned 1:1 with desired default.yaml thresholds
 
 paths:
-  inputs_dir: "inputs"
-  outputs_dir: "outputs"
-
-symbols: ["BTCUSDT"]
-
-months: ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06", "2025-07"]
-
-logging:
-  progress: true
-  progress_stride: 200
+  outputs_dir: "outputs"   # logs/state/audit live under here
 
 engine:
   warmup:
     min_1m_bars: 1200
     min_w2_candidates: 25
 
+symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
 regime:
   ts_mom:
-    require_majority: 2
+    require_majority: 3
     timeframes:
       - { tf: "1min",  lookback_closes: 30 }
       - { tf: "5min",  lookback_closes: 24 }
@@ -32,10 +25,8 @@ waves:
     k_factor: 0.35
     k_min: 0.25
     k_max: 0.60
-
   zigzag:
     max_lookback_bars: 1200
-
   adaptive:
     enabled: true
     vol_window_1m: 600
@@ -51,29 +42,45 @@ entry:
   momentum:
     zscore_window: 20
     min_body_dom: 0.50
-
   adaptive:
     enabled: true
-    zscore_k_range:      [0.90, 1.30]
-    range_atr_min_range: [0.90, 1.10]
+    zscore_k_range:      [1.00, 2.50]
+    range_atr_min_range: [1.00, 1.50]
 
 risk:
   atr:
     window: 50
-
   sl:
     mode: "ATR_or_Structure"
     atr_mult: 3.0
-
   be:
     buffer:
       r_multiple: 0.05
       fees_bps_round_trip: 8.0
       slippage_bps: 5.0
-
   adaptive:
     enabled: true
     be_trigger_r_range: [0.45, 0.65]
     tsl_start_r_range:  [0.90, 1.20]
-    tsl_atr_mult_range: [1.80, 2.40]
+    tsl_atr_mult_range: [2.20, 4.40]
 
+execution:
+  venue: "binance"
+  testnet: true
+  symbols:
+    BTCUSDT: { qty: 0.001 }
+    ETHUSDT: { qty: 0.01 }
+    SOLUSDT: { qty: 1.0 }
+
+alerts:
+  telegram:
+    enabled: true
+  cooldowns:
+    seconds: 10
+  tsl_step_atr_mult: 0.25
+
+heartbeat:
+  every_hours: 2
+
+logging:
+  level: "INFO"

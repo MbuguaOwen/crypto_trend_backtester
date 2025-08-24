@@ -51,3 +51,18 @@ def donchian_high(df: pd.DataFrame, lookback: int) -> pd.Series:
 
 def donchian_low(df: pd.DataFrame, lookback: int) -> pd.Series:
     return df['low'].rolling(lookback, min_periods=1).min()
+
+# --- Live latency / close sync helper ---
+def assert_close_sync(ts, resampled_close: float, ws_close: float, tol_bps: float = 1.5) -> bool:
+    """
+    Return True if the two closes are within 'tol_bps' basis points. Use in live feed to log warnings.
+    """
+    try:
+        a = float(resampled_close)
+        b = float(ws_close)
+        if a <= 0 or b <= 0:
+            return True
+        diff_bps = abs(a - b) / ((a + b) / 2.0) * 1e4
+        return diff_bps <= tol_bps
+    except Exception:
+        return True
