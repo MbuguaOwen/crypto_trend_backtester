@@ -74,6 +74,10 @@ entry:
 
 # -------- Risk (BE / TSL / SL) --------
 risk:
+  accounting:
+    sl_exact_neg1: true         # force r_sl = -1.0 per SL exit
+    record_sl_overshoot: true   # log (realized + 1.0) as r_sl_overshoot
+    min_r0_bps: 0.5             # floor r0 to avoid micro denominators (0.5 bps of entry)
   atr:
     window: 50                        # ATR for risk stop logic
 
