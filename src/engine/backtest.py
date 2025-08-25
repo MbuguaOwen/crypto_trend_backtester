@@ -76,16 +76,52 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
             risk.update_trade(trade, row, i)
             risk.check_exit(trade, row)
             if trade.get('exit'):
-                r0 = trade['r0']
+                # --- R accounting invariants ---
+                acc = cfg.get('risk', {}).get('accounting', {}) or {}
+                sl_exact_neg1 = bool(acc.get('sl_exact_neg1', True))
+                record_sl_overs = bool(acc.get('record_sl_overshoot', True))
+                min_r0_bps = float(acc.get('min_r0_bps', 0.5))
+
+                entry_price = float(trade['entry'])
+                r0_floor = max(1e-9, entry_price * (min_r0_bps / 1e4))
+                r0_used = max(r0_floor, float(trade['r0']))
+
                 if trade['direction'] == 'LONG':
-                    r_realized = (trade['exit'] - trade['entry']) / max(1e-9, r0)
+                    r_realized = (trade['exit'] - trade['entry']) / r0_used
                 else:
-                    r_realized = (trade['entry'] - trade['exit']) / max(1e-9, r0)
+                    r_realized = (trade['entry'] - trade['exit']) / r0_used
                 trade['r_realized'] = float(r_realized)
-                er = trade.get('exit_reason', 'SL')
-                trade['r_tsl'] = float(r_realized) if er == 'TSL' else 0.0
-                trade['r_be'] = float(r_realized) if er == 'BE' else 0.0
-                trade['r_sl'] = float(r_realized) if er == 'SL' else 0.0
+
+                er = str(trade.get('exit_reason', 'SL'))
+                r_sl = 0.0
+                r_be = 0.0
+                r_tsl = 0.0
+                r_sl_overshoot = 0.0
+
+                if er == 'SL':
+                    if sl_exact_neg1:
+                        r_sl = -1.0
+                        if record_sl_overs:
+                            r_sl_overshoot = float(r_realized - r_sl)
+                    else:
+                        r_sl = float(min(0.0, r_realized))
+                elif er == 'BE':
+                    r_be = float(max(0.0, r_realized))
+                elif er == 'TSL':
+                    r_tsl = float(max(0.0, r_realized))
+                elif er == 'EOD':
+                    pass
+
+                trade['r_sl'] = r_sl
+                trade['r_be'] = r_be
+                trade['r_tsl'] = r_tsl
+                trade['r_sl_overshoot'] = r_sl_overshoot
+
+                if sl_exact_neg1:
+                    trade['r_realized_adjusted'] = r_sl + r_be + r_tsl + r_sl_overshoot
+                else:
+                    trade['r_realized_adjusted'] = r_sl + r_be + r_tsl
+
                 logs_dir = os.path.join(outputs_dir, 'logs')
                 os.makedirs(logs_dir, exist_ok=True)
                 st = trade.get('stop_trace', [])
@@ -152,15 +188,52 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
         last = iloc[-1]
         trade['exit'] = float(last['close'])
         trade['exit_reason'] = 'EOD'
+
+        acc = cfg.get('risk', {}).get('accounting', {}) or {}
+        sl_exact_neg1 = bool(acc.get('sl_exact_neg1', True))
+        record_sl_overs = bool(acc.get('record_sl_overshoot', True))
+        min_r0_bps = float(acc.get('min_r0_bps', 0.5))
+
+        entry_price = float(trade['entry'])
+        r0_floor = max(1e-9, entry_price * (min_r0_bps / 1e4))
+        r0_used = max(r0_floor, float(trade['r0']))
+
         if trade['direction'] == 'LONG':
-            r_realized = (trade['exit'] - trade['entry']) / max(1e-9, trade['r0'])
+            r_realized = (trade['exit'] - trade['entry']) / r0_used
         else:
-            r_realized = (trade['entry'] - trade['exit']) / max(1e-9, trade['r0'])
+            r_realized = (trade['entry'] - trade['exit']) / r0_used
         trade['r_realized'] = float(r_realized)
-        er = trade.get('exit_reason', 'SL')
-        trade['r_tsl'] = float(r_realized) if er == 'TSL' else 0.0
-        trade['r_be'] = float(r_realized) if er == 'BE' else 0.0
-        trade['r_sl'] = float(r_realized) if er == 'SL' else 0.0
+
+        er = str(trade.get('exit_reason', 'SL'))
+        r_sl = 0.0
+        r_be = 0.0
+        r_tsl = 0.0
+        r_sl_overshoot = 0.0
+
+        if er == 'SL':
+            if sl_exact_neg1:
+                r_sl = -1.0
+                if record_sl_overs:
+                    r_sl_overshoot = float(r_realized - r_sl)
+            else:
+                r_sl = float(min(0.0, r_realized))
+        elif er == 'BE':
+            r_be = float(max(0.0, r_realized))
+        elif er == 'TSL':
+            r_tsl = float(max(0.0, r_realized))
+        elif er == 'EOD':
+            pass
+
+        trade['r_sl'] = r_sl
+        trade['r_be'] = r_be
+        trade['r_tsl'] = r_tsl
+        trade['r_sl_overshoot'] = r_sl_overshoot
+
+        if sl_exact_neg1:
+            trade['r_realized_adjusted'] = r_sl + r_be + r_tsl + r_sl_overshoot
+        else:
+            trade['r_realized_adjusted'] = r_sl + r_be + r_tsl
+
         logs_dir = os.path.join(outputs_dir, 'logs')
         os.makedirs(logs_dir, exist_ok=True)
         st = trade.get('stop_trace', [])
@@ -171,10 +244,45 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None):
 
     trades_df = pd.DataFrame(trades)
     if not trades_df.empty:
-        for col in ('r_tsl', 'r_be', 'r_sl'):
+        for col in ('r_tsl', 'r_be', 'r_sl', 'r_sl_overshoot', 'r_realized_adjusted'):
             if col not in trades_df.columns:
                 trades_df[col] = 0.0
+
+        try:
+            bad_pos_sl = (trades_df.loc[trades_df['exit_reason'] == 'SL', 'r_sl'] > -1e-9).sum()
+            if bad_pos_sl:
+                print(f"[WARN] {bad_pos_sl} SL rows have r_sl > 0 (should be <= 0).")
+            sl_cnt = int((trades_df['exit_reason'] == 'SL').sum())
+            sl_sum = float(trades_df['r_sl'].sum())
+            acc = cfg.get('risk', {}).get('accounting', {}) or {}
+            sl_exact_neg1 = bool(acc.get('sl_exact_neg1', True))
+            if abs(sl_sum + sl_cnt) > 1e-6 and sl_exact_neg1:
+                print(f"[WARN] sum(r_sl)={sl_sum:.4f} vs -SL_count={-sl_cnt} (expected match).")
+            if (trades_df['r_be'] < -1e-9).any():
+                print("[WARN] Negative r_be detected (should be >= 0).")
+            if (trades_df['r_tsl'] < -1e-9).any():
+                print("[WARN] Negative r_tsl detected (should be >= 0).")
+            diff = (trades_df['r_realized_adjusted'] - trades_df['r_realized']).abs().sum()
+            if diff > 1e-6:
+                print(f"[WARN] Sum of buckets differs from r_realized by {diff:.6f} total.")
+        except Exception as _e:
+            pass
+
     trades_df.to_csv(os.path.join(outputs_dir, f"{symbol}_trades.csv"), index=False)
+
+    if not trades_df.empty:
+        totals = {
+            'sum_r_sl': float(trades_df['r_sl'].sum()),
+            'sum_r_be': float(trades_df['r_be'].sum()),
+            'sum_r_tsl': float(trades_df['r_tsl'].sum()),
+            'sum_r_sl_overshoot': float(trades_df.get('r_sl_overshoot', 0.0).sum()),
+            'sum_r_realized': float(trades_df['r_realized'].sum()),
+            'sum_r_realized_adjusted': float(trades_df.get('r_realized_adjusted', trades_df['r_realized']).sum()),
+            'SL_count': int((trades_df['exit_reason'] == 'SL').sum()),
+            'BE_count': int((trades_df['exit_reason'] == 'BE').sum()),
+            'TSL_count': int((trades_df['exit_reason'] == 'TSL').sum()),
+        }
+        pd.DataFrame([totals]).to_csv(os.path.join(outputs_dir, f"{symbol}_bucket_totals.csv"), index=False)
 
     summary = {'symbol': symbol, 'trades': len(trades_df), 'blockers': blockers}
     if not trades_df.empty:
