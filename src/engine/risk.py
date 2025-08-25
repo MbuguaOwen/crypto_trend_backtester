@@ -137,19 +137,21 @@ class RiskManager:
         if trade['direction'] == 'LONG':
             if row['low'] <= float(trade['stop']):
                 trade['exit'] = float(trade['stop'])
-                # Map internal stop_mode to public exit_reason.
-                # Keeping this mapping explicit preserves accounting invariants.
-                trade['exit_reason'] = {
-                    'INIT': 'SL',
-                    'BE': 'BE',
-                    'TSL': 'TSL',
-                }.get(trade.get('stop_mode', 'INIT'), 'SL')
+                mode = str(trade.get('stop_mode', 'INIT')).upper()
+                if mode == 'TSL':
+                    trade['exit_reason'] = 'TSL'
+                elif mode == 'BE':
+                    trade['exit_reason'] = 'BE'
+                else:
+                    trade['exit_reason'] = 'SL'
         else:
             if row['high'] >= float(trade['stop']):
                 trade['exit'] = float(trade['stop'])
-                trade['exit_reason'] = {
-                    'INIT': 'SL',
-                    'BE': 'BE',
-                    'TSL': 'TSL',
-                }.get(trade.get('stop_mode', 'INIT'), 'SL')
+                mode = str(trade.get('stop_mode', 'INIT')).upper()
+                if mode == 'TSL':
+                    trade['exit_reason'] = 'TSL'
+                elif mode == 'BE':
+                    trade['exit_reason'] = 'BE'
+                else:
+                    trade['exit_reason'] = 'SL'
 
