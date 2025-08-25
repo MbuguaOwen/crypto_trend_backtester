@@ -71,6 +71,11 @@ risk:
       fees_bps_round_trip: 8.0
       slippage_bps: 5.0
 
+  accounting:
+    sl_exact_neg1: true
+    record_sl_overshoot: true
+    min_r0_bps: 0.5
+
   adaptive:
     enabled: true
     be_trigger_r_range: [0.45, 0.65]

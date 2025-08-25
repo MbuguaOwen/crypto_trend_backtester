@@ -137,6 +137,8 @@ class RiskManager:
         if trade['direction'] == 'LONG':
             if row['low'] <= float(trade['stop']):
                 trade['exit'] = float(trade['stop'])
+                # Map internal stop_mode to public exit_reason.
+                # Keeping this mapping explicit preserves accounting invariants.
                 trade['exit_reason'] = {
                     'INIT': 'SL',
                     'BE': 'BE',
