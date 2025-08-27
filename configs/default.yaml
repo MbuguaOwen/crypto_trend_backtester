@@ -83,7 +83,7 @@ risk:
 
   sl:
     mode: "ATR_or_Structure"          # code uses structure vs ATR combo; keep explicit
-    atr_mult: 2.0                     # slightly tighter initial stop to realize risk faster
+    atr_mult: 25.0                     # slightly tighter initial stop to realize risk faster
 
   be:
     buffer:
@@ -96,7 +96,7 @@ risk:
     # Make BE arm earlier and TSL start sooner so TSL actually shows up in exits.
     be_trigger_r_range: [0.30, 0.50]  # arms BE early
     tsl_start_r_range:  [0.60, 0.90]  # trail engages quickly
-    tsl_atr_mult_range: [1.40, 2.00]  # tight trail to force TSL exits
+    tsl_atr_mult_range: [15.0, 20.0]  # tight trail to force TSL exits
 
 # ---- Notes for sweep control (optional) ----
 # You can create multiple YAMLs (e.g., default_loose.yaml, default_mid.yaml) that vary only these blocks:
@@ -108,7 +108,7 @@ risk:
 #   python -m run_backtest --config configs/default_max.yaml --workers 1
 
 backtest:
-  mode: "insample"
+  mode: "walkforward"     # "insample" | "oos" | "walkforward"
   oos_last_k_months: 2
   walkforward:
     train_months: 3
