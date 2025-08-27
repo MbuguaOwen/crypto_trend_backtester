@@ -212,6 +212,21 @@ def main():
 
         base_out = os.path.join(cfg['paths']['outputs_dir'], 'oos')
         os.makedirs(base_out, exist_ok=True)
+
+        mp_ctx = mp.get_context("spawn")
+        manager = mp_ctx.Manager()
+        q = manager.Queue(maxsize=10000)
+        stop_evt = threading.Event()
+        listener_thread = threading.Thread(target=_progress_listener, args=(q, stop_evt), daemon=True)
+        listener_thread.start()
+
+        def hook(sym: str, done: int, total: int):
+            try:
+                q.put({'type': 'init', 'symbol': sym, 'total': int(total)})
+                q.put({'type': 'tick', 'symbol': sym, 'done': int(done)})
+            except Exception:
+                pass
+
         summaries = []
         agg_keys = [
             'sum_r_sl', 'sum_r_be', 'sum_r_tsl', 'sum_r_sl_overshoot', 'sum_r_realized',
@@ -225,32 +240,41 @@ def main():
         win_acc = 0.0
         avg_acc = 0.0
 
-        for sym in symbols:
-            df_all = load_symbol_1m(cfg['paths']['inputs_dir'], sym, cfg['months'], progress=cfg['logging']['progress'])
-            train_months = cfg['months'][:-oos_k] if oos_k else cfg['months']
-            test_months = cfg['months'][-oos_k:] if oos_k else []
-            df_train = df_for_months(df_all, train_months)
-            df_test = df_for_months(df_all, test_months)
-            if df_test.empty:
-                continue
-            df_fold = pd.concat([df_train, df_test]).sort_index()
-            start_ts = df_test.index[0]
-            cfg_sym = deepcopy(cfg)
-            cfg_sym['paths']['outputs_dir'] = base_out
-            s = run_for_symbol(cfg_sym, sym, progress_hook=None, df1m_override=df_fold, trade_start_ts=start_ts)
-            s.update({
-                'train_months': train_months,
-                'test_months': test_months,
-                'trade_start_ts': start_ts.isoformat(),
-                'bars_train': int(len(df_train)),
-                'bars_test': int(len(df_test)),
-            })
-            summaries.append(s)
-            for k in agg_keys:
-                if k in s:
-                    aggregate[k] += s.get(k, 0.0)
-            win_acc += s.get('win_rate', 0.0) * s.get('trades', 0)
-            avg_acc += s.get('avg_R', 0.0) * s.get('trades', 0)
+        try:
+            for sym in symbols:
+                df_all = load_symbol_1m(cfg['paths']['inputs_dir'], sym, cfg['months'],
+                                        progress=cfg['logging']['progress'])
+                train_months = cfg['months'][:-oos_k] if oos_k else cfg['months']
+                test_months = cfg['months'][-oos_k:] if oos_k else []
+                df_train = df_for_months(df_all, train_months)
+                df_test = df_for_months(df_all, test_months)
+                if df_test.empty:
+                    continue
+                df_fold = pd.concat([df_train, df_test]).sort_index()
+                start_ts = df_test.index[0]
+                cfg_sym = deepcopy(cfg)
+                cfg_sym['paths']['outputs_dir'] = base_out
+                s = run_for_symbol(cfg_sym, sym,
+                                   progress_hook=hook,
+                                   df1m_override=df_fold,
+                                   trade_start_ts=start_ts)
+                s.update({
+                    'train_months': train_months,
+                    'test_months': test_months,
+                    'trade_start_ts': start_ts.isoformat(),
+                    'bars_train': int(len(df_train)),
+                    'bars_test': int(len(df_test)),
+                })
+                summaries.append(s)
+                for k in agg_keys:
+                    if k in s:
+                        aggregate[k] += s.get(k, 0.0)
+                win_acc += s.get('win_rate', 0.0) * s.get('trades', 0)
+                avg_acc += s.get('avg_R', 0.0) * s.get('trades', 0)
+        finally:
+            stop_evt.set()
+            listener_thread.join(timeout=1.0)
+
         tot = aggregate.get('trades', 0)
         if tot > 0:
             aggregate['win_rate'] = win_acc / tot
@@ -266,8 +290,31 @@ def main():
         from src.engine.walkforward import run_walkforward
 
         params = wf_params or {'train': 0, 'test': 0, 'step': 0}
-        for sym in symbols:
-            run_walkforward(cfg, sym, params.get('train', 0), params.get('test', 0), params.get('step', 0))
+
+        mp_ctx = mp.get_context("spawn")
+        manager = mp_ctx.Manager()
+        q = manager.Queue(maxsize=10000)
+        stop_evt = threading.Event()
+        listener_thread = threading.Thread(target=_progress_listener, args=(q, stop_evt), daemon=True)
+        listener_thread.start()
+
+        def hook(sym: str, done: int, total: int):
+            try:
+                q.put({'type': 'init', 'symbol': sym, 'total': int(total)})
+                q.put({'type': 'tick', 'symbol': sym, 'done': int(done)})
+            except Exception:
+                pass
+
+        try:
+            for sym in symbols:
+                run_walkforward(cfg, sym,
+                                params.get('train', 0),
+                                params.get('test', 0),
+                                params.get('step', 0),
+                                progress_hook=hook)
+        finally:
+            stop_evt.set()
+            listener_thread.join(timeout=1.0)
 
 
 if __name__ == "__main__":

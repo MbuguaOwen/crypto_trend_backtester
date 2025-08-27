@@ -3,7 +3,6 @@ import json
 import yaml
 import pandas as pd
 
-from .data import load_symbol_1m
 from .utils import atr as atr_1m_fn
 from .cusum import build_cusum_bars
 from .adaptive import AdaptiveController
@@ -81,29 +80,8 @@ def _apply_r_accounting(trade: dict, cfg: dict) -> dict:
     return trade
 
 
-def _warm_start(df1m: pd.DataFrame, waves: WaveGate, wm: int, wc: int, target_ts: pd.Timestamp) -> tuple[int, int]:
-    """Prewarm WaveGate up to `target_ts` ensuring warmup gates."""
-    i_warm = wm
-    idx = df1m.index
-    ts_warm = idx[min(i_warm, len(df1m) - 1)]
-    seen = waves.prewarm_until(ts_warm)
-    while seen < wc and ts_warm < target_ts and i_warm < len(df1m) - 1:
-        i_warm = min(len(df1m) - 1, i_warm + wm // 5)
-        ts_warm = idx[i_warm]
-        seen += waves.prewarm_until(ts_warm)
-    if ts_warm < target_ts:
-        seen += waves.prewarm_until(target_ts)
-        i_warm = max(i_warm, idx.get_indexer([target_ts], method='pad')[0])
-    return i_warm, seen
-
-
-def run_for_symbol(
-    cfg: dict,
-    symbol: str,
-    progress_hook=None,
-    df1m_override: pd.DataFrame | None = None,
-    trade_start_ts: pd.Timestamp | None = None,
-):
+def run_for_symbol(cfg: dict, symbol: str, progress_hook=None,
+                   df1m_override=None, trade_start_ts=None):
     inputs_dir = cfg['paths']['inputs_dir']
     outputs_dir = cfg['paths']['outputs_dir']
     months = cfg['months']
@@ -112,6 +90,7 @@ def run_for_symbol(
     if df1m_override is not None:
         df1m = df1m_override
     else:
+        from .data import load_symbol_1m
         df1m = load_symbol_1m(inputs_dir, symbol, months, progress=cfg['logging']['progress'])
     if df1m.empty:
         raise RuntimeError('No 1m data loaded')
@@ -134,13 +113,21 @@ def run_for_symbol(
     wm = int(cfg['engine']['warmup']['min_1m_bars'])
     wc = int(cfg['engine']['warmup']['min_w2_candidates'])
 
+    i_warm = wm
+    ts_warm = df1m.index[min(i_warm, len(df1m) - 1)]
+    seen = waves.prewarm_until(ts_warm)
+    while seen < wc and i_warm < len(df1m) - 1:
+        i_warm = min(len(df1m) - 1, i_warm + wm // 5)
+        ts_warm = df1m.index[i_warm]
+        seen += waves.prewarm_until(ts_warm)
+
     if trade_start_ts is not None:
-        i_warm, seen = _warm_start(df1m, waves, wm, wc, trade_start_ts)
-        start_i = max(wm, df1m.index.get_indexer([trade_start_ts], method='pad')[0])
+        ts_boundary = pd.to_datetime(trade_start_ts, utc=True)
+        seen += waves.prewarm_until(ts_boundary)
+        start_i = max(wm, df1m.index.get_indexer([ts_boundary], method='pad')[0])
     else:
-        default_ts = df1m.index[min(wm, len(df1m) - 1)]
-        i_warm, seen = _warm_start(df1m, waves, wm, wc, default_ts)
         start_i = max(wm, i_warm)
+
     assert ac.ready(start_i, seen), "Warm-start gates not satisfied; increase warmup or data length."
 
     trades = []
