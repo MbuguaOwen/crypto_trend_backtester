@@ -52,14 +52,23 @@ class RiskManager:
         self.atr1m = atr1m
         self.ac = ac
 
-        self.atr_risk = atr(df1m, int(cfg['risk']['atr']['window'])).reindex(df1m.index).ffill()
+        # safe ATR risk series initialization (allow tests/minimal cfg)
+        try:
+            if df1m is not None and cfg.get('risk') and cfg['risk'].get('atr'):
+                self.atr_risk = atr(df1m, int(cfg['risk']['atr']['window'])).reindex(df1m.index).ffill()
+            elif atr1m is not None:
+                self.atr_risk = atr1m
+            else:
+                self.atr_risk = None
+        except Exception:
+            self.atr_risk = None
 
-        buf = cfg['risk']['be']['buffer']
-        self.be_r_mult = float(buf['r_multiple'])
-        self.be_fees = float(buf['fees_bps_round_trip'])
-        self.be_slip = float(buf['slippage_bps'])
-        self.sl_mode = cfg['risk']['sl']['mode']
-        self.sl_atr_mult = float(cfg['risk']['sl']['atr_mult'])
+        buf = ((cfg.get('risk', {}).get('be', {}) or {}).get('buffer', {}) or {})
+        self.be_r_mult = float(buf.get('r_multiple', 0.12))
+        self.be_fees = float(buf.get('fees_bps_round_trip', 0.0))
+        self.be_slip = float(buf.get('slippage_bps', 0.0))
+        self.sl_mode = (cfg.get('risk', {}).get('sl', {}) or {}).get('mode', 'ATR_or_Structure')
+        self.sl_atr_mult = float((cfg.get('risk', {}).get('sl', {}) or {}).get('atr_mult', 3.0))
 
         # ---- NEW: backtest exit model controls ----
         bex = ((cfg.get('backtest', {}) or {}).get('exits', {}) or {})
@@ -243,4 +252,8 @@ class RiskManager:
         trade['exit_r_raw'] = float(r_raw)
         trade['exit_r_fee'] = float(fee_r)
         trade['exit_r'] = float(r_net)
+
+        # Guard: exit_r must be finite to avoid corrupt KPIs
+        import math
+        assert math.isfinite(trade['exit_r']), 'exit_r not finite; check r0, fee math'
 

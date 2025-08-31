@@ -31,8 +31,8 @@ regime:
 waves:
   cusum:
     atr_window_1m: 220
-    k_factor: 1.60          # was 1.80
-    k_min: 1.00             # was 1.20
+    k_factor: 1.80
+    k_min: 1.20
     k_max: 3.50
 
   zigzag:
@@ -41,24 +41,24 @@ waves:
   adaptive:
     enabled: true
     vol_window_1m: 600
-    atr_window_range: [120, 240]   # was [90, 260]
-    atr_mult_range:   [1.00, 1.80] # keep permissive swings
-    thresholds_quantile: 0.35      # keep permissive
+    atr_window_range: [90, 260]
+    atr_mult_range:   [1.00, 1.80]
+    thresholds_quantile: 0.35
     w2_end_arm_hint: 0.50
     w2_post_min_hint: 0.50
-    min_conf_hint: 0.50            # was 0.55 → arm a few more W2s
-    max_age_bars_range: [90, 320]  # was [80, 300]
+    min_conf_hint: 0.55
+    max_age_bars_range: [80, 300]
 
 # -------- Entry (Momentum Power Bar) --------
 entry:
   momentum:
-    zscore_window: 22              # was 24
-    min_body_dom: 0.56             # was 0.58
+    zscore_window: 24
+    min_body_dom: 0.58
 
   adaptive:
     enabled: true
-    zscore_k_range:      [1.50, 2.30]  # was [1.80, 2.60]
-    range_atr_min_range: [1.00, 1.60]  # was [1.20, 1.80]
+    zscore_k_range: [1.80, 2.60]
+    range_atr_min_range: [1.20, 1.80]
 
 # -------- Risk (BE / TSL / SL) --------
 risk:
@@ -71,7 +71,7 @@ risk:
 
   sl:
     mode: "ATR_or_Structure"
-    atr_mult: 3.0                 # was 25.0 (restore realistic risk unit)
+    atr_mult: 25.0
 
   be:
     buffer:
@@ -82,8 +82,8 @@ risk:
   adaptive:
     enabled: true
     be_trigger_r_range: [0.50, 0.80]
-    tsl_start_r_range:  [1.00, 1.60]   # engage trail a touch earlier
-    tsl_atr_mult_range: [3.0, 4.0]     # was [15.0, 20.0] so TSL can actually hit
+    tsl_start_r_range:  [1.00, 1.80]
+    tsl_atr_mult_range: [15.0, 20.0]
 
 backtest:
   mode: "walkforward"
@@ -97,4 +97,5 @@ backtest:
     fill_model: "exchange"
     slip_bps: 15
     fees_bps_round_trip: 10
+
 

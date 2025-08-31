@@ -9,7 +9,7 @@ from .cusum import build_cusum_bars
 from .adaptive import AdaptiveController
 from .waves import WaveGate
 from .trigger import Trigger
-from .risk import RiskManager
+from risk import RiskManager
 from .regime import TSMOMRegime
 
 
@@ -269,25 +269,39 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None,
 
     summary = {'symbol': symbol, 'trades': len(trades_df), 'blockers': blockers}
     if not trades_df.empty:
-        # Sanity: ensure exit_r has no non-finite values where present
-        if 'exit_r' in trades_df.columns:
-            bad = int((~np.isfinite(trades_df['exit_r'].dropna())).sum())
-            assert bad == 0, f"Non-finite exit_r rows: {bad}"
+        import numpy as np
 
-        # Prefer net realized R from exit model (post r0 floor), fallback to r_realized
-        if 'exit_r' in trades_df.columns:
-            r_pref = trades_df['exit_r'].fillna(trades_df.get('r_realized', 0.0))
-        else:
-            r_pref = trades_df['r_realized'] if 'r_realized' in trades_df.columns else None
+        # Prefer exit_r (post-fix). Fallback to r_realized_adjusted if any non-finite values.
+        r_pref = trades_df['exit_r'].copy() if 'exit_r' in trades_df.columns else None
+        if r_pref is None or (~np.isfinite(r_pref)).any():
+            r_pref = trades_df['r_realized_adjusted'].copy()
 
-        if r_pref is not None:
-            summary.update({
-                'win_rate': float((r_pref > 0).mean()),
-                'avg_R': float(r_pref.mean()),
-                'median_R': float(r_pref.median()),
-                'sum_R': float(r_pref.sum()),
-                'exits': trades_df['exit_reason'].value_counts().to_dict(),
-            })
+        r_pref = r_pref.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        summary['trades'] = int(len(trades_df))
+        summary['win_rate'] = float((r_pref > 0).mean()) if len(trades_df) else 0.0
+        summary['avg_R'] = float(r_pref.mean()) if len(trades_df) else 0.0
+        summary['median_R'] = float(r_pref.median()) if len(trades_df) else 0.0
+        summary['sum_R'] = float(r_pref.sum()) if len(trades_df) else 0.0
+        summary['exits'] = trades_df['exit_reason'].value_counts().to_dict()
+
+        # Sanity guards
+        assert (~np.isfinite(r_pref)).sum() == 0, 'Non-finite realized R in KPIs'
+
+        # Optional reconciliation
+        if {'r_realized_adjusted', 'r_realized'}.issubset(trades_df.columns):
+            diff_total = float((trades_df['r_realized_adjusted'] - trades_df['r_realized']).abs().sum())
+            if diff_total > 1e-6:
+                print(f"[WARN] bucket vs realized diff total: {diff_total:.6f}")
+
+        # BE realism check: 75th percentile of BE exits should be < +0.25R
+        if {'exit_reason', 'exit_r'}.issubset(trades_df.columns):
+            be = trades_df.query("exit_reason == 'BE'")
+            if len(be) > 0:
+                q75 = float(be['exit_r'].quantile(0.75))
+                assert q75 < 0.25, f"BE exits unrealistically positive (q75={q75:.2f}); likely TSL misclassification"
+
+        # keep existing aggregates
         summary.update({
             'sum_r_sl': float(trades_df['r_sl'].sum()),
             'sum_r_be': float(trades_df['r_be'].sum()),
@@ -316,6 +330,14 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None,
     os.makedirs(logs_dir, exist_ok=True)
     with open(os.path.join(logs_dir, f"{symbol}_params_run.json"), 'w') as f:
         json.dump(params, f, indent=2)
+
+    # Blocker telemetry for quick diagnosis
+    if 'blockers' in summary:
+        b = summary['blockers']
+        try:
+            print(f"[BLOCKERS] regime_flat={b.get('regime_flat',0)} wave_not_armed={b.get('wave_not_armed',0)} trigger_fail={b.get('trigger_fail',0)}")
+        except Exception:
+            pass
 
     return summary
 

@@ -1,5 +1,6 @@
 # run_backtest.py
 import os
+import sys, glob
 import argparse
 import concurrent.futures
 import multiprocessing as mp
@@ -12,6 +13,14 @@ import yaml
 from tqdm import tqdm
 import json
 import pandas as pd
+# Hygiene: list risk.py candidates and show the one imported
+dups = [p for p in glob.glob("**/risk.py", recursive=True)]
+print(f"[HYGIENE] risk.py candidates: {dups}")
+try:
+    import risk as _risk_mod  # ensure the module resolved on sys.path
+    print(f"[HYGIENE] risk module in use: {_risk_mod.__file__}")
+except Exception as _e:
+    print(f"[HYGIENE] risk import failed: {_e}")
 # ------ Progress message structure ------
 # {'type': 'init', 'symbol': str, 'total': int}
 # {'type': 'tick', 'symbol': str, 'done': int}
