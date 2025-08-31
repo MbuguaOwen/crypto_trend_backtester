@@ -2,6 +2,49 @@ from .adaptive import AdaptiveController
 from .utils import atr
 
 
+# --- NEW: small helper to clamp a value between lo and hi
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+# --- NEW: compute the actual exit fill price given a stop breach and model
+def _exit_fill_price(
+    direction: str,
+    stop_price: float,
+    bar_low: float,
+    bar_high: float,
+    bar_close: float,
+    fill_model: str = "exchange",
+    slip_bps: float = 0.0,
+) -> float:
+    """
+    Models STOP_MARKET fills on breach.
+    - exchange: apply slippage to stop and clamp to bar range (realistic)
+    - conservative: LONG uses min(stop, close, low); SHORT uses max(stop, close, high)
+    """
+    s = float(stop_price)
+    lo = float(bar_low)
+    hi = float(bar_high)
+    c = float(bar_close)
+
+    if fill_model.lower() == "conservative":
+        if direction == "LONG":
+            return min(s, c, lo)
+        else:
+            return max(s, c, hi)
+
+    # exchange-like model
+    slip = abs(float(slip_bps)) / 10_000.0
+    if direction == "LONG":
+        # stop triggers a SELL → price no better than stop; slippage moves fill below stop
+        raw = s * (1.0 - slip)
+        return _clamp(raw, lo, s)
+    else:
+        # stop triggers a BUY to cover short → price no better than stop; slippage above stop
+        raw = s * (1.0 + slip)
+        return _clamp(raw, s, hi)
+
+
 class RiskManager:
     def __init__(self, cfg: dict, df1m, atr1m, ac: AdaptiveController):
         self.cfg = cfg
@@ -17,6 +60,15 @@ class RiskManager:
         self.be_slip = float(buf['slippage_bps'])
         self.sl_mode = cfg['risk']['sl']['mode']
         self.sl_atr_mult = float(cfg['risk']['sl']['atr_mult'])
+
+        # ---- NEW: backtest exit model controls ----
+        bex = ((cfg.get('backtest', {}) or {}).get('exits', {}) or {})
+        self.bt_fill_model = str(bex.get('fill_model', 'exchange'))
+        self.bt_slip_bps = float(bex.get('slip_bps', 0.0))
+
+        # fees for realized-R; prefer exits.fees_bps_round_trip if present,
+        # else reuse whatever you already use for BE fees/buffer (self.be_fees)
+        self.fees_bps_rt = float(bex.get('fees_bps_round_trip', getattr(self, 'be_fees', 0.0)))
 
     def thresholds(self, i_bar_1m: int) -> dict:
         return self.ac.risk_params(i_bar_1m)
@@ -131,27 +183,64 @@ class RiskManager:
             trade['last_logged_mode'] = mode_now
 
     def check_exit(self, trade: dict, row):
+        # already exited?
         if trade.get('exit'):
             return
         self._ensure(trade)
-        if trade['direction'] == 'LONG':
-            if row['low'] <= float(trade['stop']):
-                trade['exit'] = float(trade['stop'])
-                mode = str(trade.get('stop_mode', 'INIT')).upper()
-                if mode == 'TSL':
-                    trade['exit_reason'] = 'TSL'
-                elif mode == 'BE':
-                    trade['exit_reason'] = 'BE'
-                else:
-                    trade['exit_reason'] = 'SL'
+
+        direction = str(trade['direction'])
+        stop_px = float(trade['stop'])
+        low = float(row['low'])
+        high = float(row['high'])
+        close = float(row['close'])
+        entry = float(trade['entry'])
+        # --- Floor r0 to avoid absurd R due to tiny denominators
+        acc = (self.cfg.get('risk', {}).get('accounting', {}) or {})
+        min_r0_bps = float(acc.get('min_r0_bps', 0.5))
+        r0 = max(1e-9, float(trade['r0']))
+        r0_floor = entry * (min_r0_bps / 10_000.0)
+        r0_used = max(r0, r0_floor)
+
+        breached = (direction == 'LONG' and low <= stop_px) or (direction == 'SHORT' and high >= stop_px)
+        if not breached:
+            return
+
+        # classify reason using your current stop_mode semantics (unchanged)
+        mode = str(trade.get('stop_mode', 'INIT')).upper()
+        if mode == 'TSL':
+            reason = 'TSL'
+        elif mode == 'BE':
+            reason = 'BE'
         else:
-            if row['high'] >= float(trade['stop']):
-                trade['exit'] = float(trade['stop'])
-                mode = str(trade.get('stop_mode', 'INIT')).upper()
-                if mode == 'TSL':
-                    trade['exit_reason'] = 'TSL'
-                elif mode == 'BE':
-                    trade['exit_reason'] = 'BE'
-                else:
-                    trade['exit_reason'] = 'SL'
+            reason = 'SL'
+
+        # --- NEW: compute realistic exit fill
+        exit_fill = _exit_fill_price(
+            direction=direction,
+            stop_price=stop_px,
+            bar_low=low,
+            bar_high=high,
+            bar_close=close,
+            fill_model=self.bt_fill_model,
+            slip_bps=self.bt_slip_bps,
+        )
+
+        # --- NEW: realized R including fees (round-trip) in R units
+        # raw R from price move (use r0_used)
+        if direction == 'LONG':
+            r_raw = (exit_fill - entry) / r0_used
+        else:
+            r_raw = (entry - exit_fill) / r0_used
+
+        # fee impact in R units (approx: bps of notional divided by risk distance)
+        fee_r = (self.fees_bps_rt / 10_000.0) * entry / r0_used
+        r_net = r_raw - fee_r
+
+        # record exit + diagnostics
+        trade['exit'] = float(exit_fill)
+        trade['exit_reason'] = reason
+        trade['r0_used'] = float(r0_used)
+        trade['exit_r_raw'] = float(r_raw)
+        trade['exit_r_fee'] = float(fee_r)
+        trade['exit_r'] = float(r_net)
 

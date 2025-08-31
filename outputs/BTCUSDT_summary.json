@@ -1,0 +1,27 @@
+{
+  "symbol": "BTCUSDT",
+  "trades": 138,
+  "blockers": {
+    "regime_flat": 10408,
+    "wave_not_armed": 30629,
+    "trigger_fail": 850
+  },
+  "win_rate": 0.050724637681159424,
+  "avg_R": -12763408531.599318,
+  "median_R": -1.5331782036509116,
+  "sum_R": -1761350377360.7058,
+  "exits": {
+    "BE": 54,
+    "SL": 45,
+    "TSL": 39
+  },
+  "sum_r_sl": -45.0,
+  "sum_r_be": 6.485600919121827,
+  "sum_r_tsl": 24.442107660001092,
+  "sum_r_sl_overshoot": -63.389859375129774,
+  "sum_r_realized": -91.68496904859421,
+  "sum_r_realized_adjusted": -77.46215079600684,
+  "SL_count": 45,
+  "BE_count": 54,
+  "TSL_count": 39
+}

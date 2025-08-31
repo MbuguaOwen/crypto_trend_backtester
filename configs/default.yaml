@@ -114,3 +114,9 @@ backtest:
     train_months: 3
     test_months: 1
     step_months: 1
+
+  # Live-like stop fills (optional but recommended)
+  exits:
+    fill_model: "exchange"
+    slip_bps: 15
+    fees_bps_round_trip: 10

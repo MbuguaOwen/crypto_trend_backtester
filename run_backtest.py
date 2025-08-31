@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 import yaml
 from tqdm import tqdm
 import json
-
+import pandas as pd
 # ------ Progress message structure ------
 # {'type': 'init', 'symbol': str, 'total': int}
 # {'type': 'tick', 'symbol': str, 'done': int}
@@ -138,7 +138,7 @@ def main():
     ap.add_argument("--walkforward", type=str, default=None, help="Walk-forward params 'train=3,test=1,step=1'")
     args = ap.parse_args()
 
-    with open(args.config, "r") as f:
+    with open(args.config, "r", encoding="utf-8-sig", newline="") as f:
         cfg = yaml.safe_load(f)
 
     symbols = list(cfg.get('symbols', []))

@@ -1,0 +1,56 @@
+{
+  "summaries": [
+    {
+      "symbol": "BTCUSDT",
+      "trades": 1,
+      "blockers": {
+        "regime_flat": 21006,
+        "wave_not_armed": 66400,
+        "trigger_fail": 382
+      },
+      "win_rate": 0.0,
+      "avg_R": -1.7069825659847444,
+      "median_R": -1.7069825659847444,
+      "sum_R": -1.7069825659847444,
+      "exits": {
+        "SL": 1
+      },
+      "sum_r_sl": -1.0,
+      "sum_r_be": 0.0,
+      "sum_r_tsl": 0.0,
+      "sum_r_sl_overshoot": -0.13542397581905297,
+      "sum_r_realized": -1.135423975819053,
+      "sum_r_realized_adjusted": -1.135423975819053,
+      "SL_count": 1,
+      "BE_count": 0,
+      "TSL_count": 0,
+      "train_months": [
+        "2025-01",
+        "2025-02",
+        "2025-03",
+        "2025-04",
+        "2025-05"
+      ],
+      "test_months": [
+        "2025-06",
+        "2025-07"
+      ],
+      "trade_start_ts": "2025-06-01T00:00:00+00:00",
+      "bars_train": 217439,
+      "bars_test": 87840
+    }
+  ],
+  "aggregate": {
+    "sum_r_sl": -1.0,
+    "sum_r_be": 0.0,
+    "sum_r_tsl": 0.0,
+    "sum_r_sl_overshoot": -0.13542397581905297,
+    "sum_r_realized": -1.135423975819053,
+    "SL_count": 1,
+    "BE_count": 0,
+    "TSL_count": 0,
+    "trades": 1,
+    "win_rate": 0.0,
+    "avg_R": -1.7069825659847444
+  }
+}

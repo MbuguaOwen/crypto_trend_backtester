@@ -1,0 +1,27 @@
+{
+  "symbol": "ETHUSDT",
+  "trades": 315,
+  "blockers": {
+    "regime_flat": 2915,
+    "wave_not_armed": 78125,
+    "trigger_fail": 2280
+  },
+  "win_rate": 0.6444444444444445,
+  "avg_R": 3.739433167735484,
+  "median_R": 0.5609336917562083,
+  "sum_R": 1177.9214478366775,
+  "exits": {
+    "SL": 132,
+    "BE": 97,
+    "TSL": 86
+  },
+  "sum_r_sl": -132.0,
+  "sum_r_be": 113.9609176670825,
+  "sum_r_tsl": 654.3949956746586,
+  "sum_r_sl_overshoot": 541.5655344949366,
+  "sum_r_realized": 1177.9214478366775,
+  "sum_r_realized_adjusted": 1177.9214478366775,
+  "SL_count": 132,
+  "BE_count": 97,
+  "TSL_count": 86
+}

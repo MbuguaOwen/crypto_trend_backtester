@@ -1,6 +1,7 @@
 import os
 import json
 import yaml
+import numpy as np
 import pandas as pd
 
 from .utils import atr as atr_1m_fn
@@ -268,13 +269,25 @@ def run_for_symbol(cfg: dict, symbol: str, progress_hook=None,
 
     summary = {'symbol': symbol, 'trades': len(trades_df), 'blockers': blockers}
     if not trades_df.empty:
-        summary.update({
-            'win_rate': float((trades_df['r_realized'] > 0).mean()),
-            'avg_R': float(trades_df['r_realized'].mean()),
-            'median_R': float(trades_df['r_realized'].median()),
-            'sum_R': float(trades_df['r_realized'].sum()),
-            'exits': trades_df['exit_reason'].value_counts().to_dict(),
-        })
+        # Sanity: ensure exit_r has no non-finite values where present
+        if 'exit_r' in trades_df.columns:
+            bad = int((~np.isfinite(trades_df['exit_r'].dropna())).sum())
+            assert bad == 0, f"Non-finite exit_r rows: {bad}"
+
+        # Prefer net realized R from exit model (post r0 floor), fallback to r_realized
+        if 'exit_r' in trades_df.columns:
+            r_pref = trades_df['exit_r'].fillna(trades_df.get('r_realized', 0.0))
+        else:
+            r_pref = trades_df['r_realized'] if 'r_realized' in trades_df.columns else None
+
+        if r_pref is not None:
+            summary.update({
+                'win_rate': float((r_pref > 0).mean()),
+                'avg_R': float(r_pref.mean()),
+                'median_R': float(r_pref.median()),
+                'sum_R': float(r_pref.sum()),
+                'exits': trades_df['exit_reason'].value_counts().to_dict(),
+            })
         summary.update({
             'sum_r_sl': float(trades_df['r_sl'].sum()),
             'sum_r_be': float(trades_df['r_be'].sum()),
