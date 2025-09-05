@@ -1,87 +1,78 @@
+# engine/data.py
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import List
+import re
 import pandas as pd
 import numpy as np
 
+KLINE_COLSETS = [
+    # Binance export columns (common)
+    ["open_time","open","high","low","close","volume","close_time","quote_asset_volume","number_of_trades","taker_buy_base","taker_buy_quote","ignore"],
+    # Minimal OHLCV
+    ["timestamp","open","high","low","close","volume"],
+]
 
-REQUIRED_COLS = ["timestamp", "open", "high", "low", "close", "volume"]
+def _read_csv_standardize(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    cols = [c.strip().lower() for c in df.columns]
+    df.columns = cols
 
-
-def _parse_timestamp_col(ts: pd.Series) -> pd.DatetimeIndex:
-    """
-    Parse a 'timestamp' column that may be:
-      - milliseconds since epoch (ints)
-      - ISO-8601 strings
-    Returns a UTC DatetimeIndex.
-    """
-    # If mostly numeric -> try ms since epoch.
-    numeric = pd.to_numeric(ts, errors="coerce")
-    numeric_non_na = numeric.notna().mean()
-    if numeric_non_na > 0.5:
-        # Heuristic: millisecond epoch is typically > 1e11
-        if numeric.median(skipna=True) > 1e11:
-            dt = pd.to_datetime(numeric, unit="ms", utc=True, errors="coerce")
+    if set(KLINE_COLSETS[0]).issubset(cols):  # Binance full
+        ts = pd.to_numeric(df["open_time"], errors="coerce")
+        if ts.median(skipna=True) > 1e11:
+            dt = pd.to_datetime(ts, unit="ms", utc=True, errors="coerce")
         else:
-            # seconds (fallback)
-            dt = pd.to_datetime(numeric, unit="s", utc=True, errors="coerce")
+            dt = pd.to_datetime(ts, unit="s", utc=True, errors="coerce")
+        out = pd.DataFrame({
+            "timestamp": (dt.view("int64") // 1_000_000).astype(np.int64),
+            "open":  pd.to_numeric(df["open"], errors="coerce"),
+            "high":  pd.to_numeric(df["high"], errors="coerce"),
+            "low":   pd.to_numeric(df["low"], errors="coerce"),
+            "close": pd.to_numeric(df["close"], errors="coerce"),
+            "volume":pd.to_numeric(df["volume"], errors="coerce").fillna(0.0),
+        })
+    elif set(KLINE_COLSETS[1]).issubset(cols):  # already minimal
+        ts = pd.to_numeric(df["timestamp"], errors="coerce")
+        if ts.median(skipna=True) > 1e11:
+            dt = pd.to_datetime(ts, unit="ms", utc=True, errors="coerce")
+        else:
+            dt = pd.to_datetime(ts, unit="s", utc=True, errors="coerce")
+        out = pd.DataFrame({
+            "timestamp": (dt.view("int64") // 1_000_000).astype(np.int64),
+            "open":  pd.to_numeric(df["open"], errors="coerce"),
+            "high":  pd.to_numeric(df["high"], errors="coerce"),
+            "low":   pd.to_numeric(df["low"], errors="coerce"),
+            "close": pd.to_numeric(df["close"], errors="coerce"),
+            "volume":pd.to_numeric(df["volume"], errors="coerce").fillna(0.0),
+        })
     else:
-        dt = pd.to_datetime(ts, utc=True, errors="coerce")
+        raise ValueError(f"{path} has unsupported columns: {cols}")
 
-    if dt.isna().any():
-        bad = int(dt.isna().sum())
-        raise ValueError(f"Found {bad} unparsable timestamps; ensure 'timestamp' is ISO or epoch ms/s.")
-    return pd.DatetimeIndex(dt)
+    out = out.dropna(subset=["open","high","low","close"]).astype({
+        "timestamp":"int64","open":"float64","high":"float64","low":"float64","close":"float64","volume":"float64"
+    })
+    out = out.sort_values("timestamp").drop_duplicates("timestamp")
+    if not out["timestamp"].is_monotonic_increasing:
+        out = out.sort_values("timestamp")
+    return out.reset_index(drop=True)
 
-
-def load_symbol_months(inputs_dir: str | Path, symbol: str, months: List[str]) -> pd.DataFrame:
+def load_symbol_months(inputs_dir: str, symbol: str, months: list[str]) -> pd.DataFrame:
+    """Load multiple months for a symbol. Accept filenames:
+    - inputs/<SYMBOL>/<YYYY-MM>.csv
+    - inputs/<SYMBOL>/<SYMBOL>-1m-<YYYY-MM>.csv
     """
-    Load 1m OHLCV CSVs for a symbol across a list of YYYY-MM months.
-    Enforces UTC index, strictly increasing, drops dupes (keep last), and sorts.
-    Does NOT infer missing bars.
-    """
-    inputs_dir = Path(inputs_dir)
-    frames: List[pd.DataFrame] = []
-
+    base = Path(inputs_dir) / symbol
+    parts = []
     for ym in months:
-        fpath = inputs_dir / symbol / f"{ym}.csv"
-        if not fpath.exists():
-            raise FileNotFoundError(f"Missing file: {fpath}")
-
-        df = pd.read_csv(fpath)
-        cols = [c.strip().lower() for c in df.columns]
-        df.columns = cols
-
-        missing = [c for c in REQUIRED_COLS if c not in cols]
-        if missing:
-            raise ValueError(f"{fpath} missing required columns: {missing}")
-
-        # Parse timestamp to UTC index
-        idx = _parse_timestamp_col(df["timestamp"])
-        df = df.set_index(idx).drop(columns=["timestamp"])
-
-        # Ensure numeric dtypes
-        for c in ["open", "high", "low", "close", "volume"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        if df[["open", "high", "low", "close"]].isna().any().any():
-            raise ValueError(f"{fpath} contains non-numeric OHLC values.")
-
-        df = df.sort_index()
-        # Drop dupes (keep last)
-        before = len(df)
-        df = df[~df.index.duplicated(keep="last")]
-        after = len(df)
-        # (optional) warn if duplicates dropped
-        # print(f"{fpath}: dropped {before-after} duplicate timestamps")
-
-        frames.append(df)
-
-    if not frames:
-        raise ValueError(f"No data loaded for {symbol}.")
-
-    out = pd.concat(frames, axis=0).sort_index()
-    if not out.index.is_monotonic_increasing:
-        raise ValueError(f"Index not strictly increasing for {symbol}.")
-    return out
+        # Try both patterns
+        p1 = base / f"{ym}.csv"
+        p2 = base / f"{symbol}-1m-{ym}.csv"
+        path = p1 if p1.exists() else p2
+        if not path.exists():
+            raise FileNotFoundError(f"Missing data for {symbol} {ym}: {p1} or {p2}")
+        parts.append(_read_csv_standardize(path))
+    if not parts:
+        raise ValueError(f"No data for {symbol}")
+    df = pd.concat(parts, axis=0, ignore_index=True)
+    return df

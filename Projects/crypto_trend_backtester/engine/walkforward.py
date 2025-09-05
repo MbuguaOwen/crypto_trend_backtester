@@ -1,82 +1,36 @@
+# engine/walkforward.py
 from __future__ import annotations
-
-from typing import Dict, Generator, Iterable, List, Tuple, Callable
-import json
 from pathlib import Path
-
 import pandas as pd
 
-from .backtest import run_backtest_symbol
+from .data import load_symbol_months
+from .backtest import run_insample
 
-
-def split_months(months: List[str], train: int, test: int, step: int) -> Generator[Tuple[int, List[str], List[str]], None, None]:
-    """
-    Yield (fold_idx, train_months, test_months) moving forward by `step`.
-    """
-    m = len(months)
-    fold = 1
-    i = train
-    while i + test <= m:
-        train_slice = months[i - train: i]
-        test_slice = months[i: i + test]
-        yield fold, train_slice, test_slice
-        fold += 1
+def month_slices(months: list[str], train: int, test: int, step: int):
+    i = 0
+    while i + train + test <= len(months):
+        yield months[i:i+train], months[i+train:i+train+test]
         i += step
 
+def run_walkforward(symbol: str, cfg: dict, outroot: Path):
+    months = cfg["data"]["months"]
+    train_n = cfg["walkforward"]["train_months"]
+    test_n = cfg["walkforward"]["test_months"]
+    step_n = cfg["walkforward"]["step_months"]
 
-def run_walkforward(
-    loader_fn: Callable[[str, str, List[str]], pd.DataFrame],
-    cfg: Dict,
-    symbol: str,
-    outdir: str | Path,
-) -> List[Dict]:
-    """
-    Run walk-forward folds and write per-fold stats/trades under outdir.
-    Returns list of per-fold stats dicts.
-    """
-    outdir = Path(outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
+    fold = 0
+    results = []
+    for train_m, test_m in month_slices(months, train_n, test_n, step_n):
+        # Train phase is feature/stat estimation only; we don’t fit ML, so we just load to respect no-leakage windows
+        df_test = load_symbol_months(cfg["paths"]["inputs_dir"], symbol, test_m)
 
-    months: List[str] = list(cfg["data"]["months"])
-    train_n = int(cfg["walkforward"]["train_months"])
-    test_n = int(cfg["walkforward"]["test_months"])
-    step_n = int(cfg["walkforward"]["step_months"])
+        outdir = outroot / "walkforward" / f"fold_{fold:02d}"
+        stats = run_insample(df_test, symbol, cfg, outdir)
+        stats["fold"] = fold
+        stats["train_months"] = train_m
+        stats["test_months"] = test_m
+        results.append(stats)
+        fold += 1
 
-    all_stats: List[Dict] = []
-
-    for fold, train_months, test_months in split_months(months, train_n, test_n, step_n):
-        # Load train+test concatenated to avoid leakage in features
-        df = loader_fn(cfg["paths"]["inputs_dir"], symbol, train_months + test_months)
-
-        # Determine test window boundaries
-        test_start = pd.Timestamp(test_months[0] + "-01")
-        # Approximate end: next month first day minus a tiny delta
-        # We'll derive end by finding the max timestamp within the union of test months
-        test_df = df[df.index.to_period("M").astype(str).isin(test_months)]
-        if test_df.empty:
-            # skip empty test
-            continue
-        test_start_ts = test_df.index.min()
-        test_end_ts = test_df.index.max()
-
-        trades, stats = run_backtest_symbol(
-            df, cfg, symbol, progress=True, test_start=test_start_ts, test_end=test_end_ts
-        )
-        stats_out = {
-            **stats,
-            "fold": fold,
-            "train_months": train_months,
-            "test_months": test_months,
-        }
-        all_stats.append(stats_out)
-
-        fold_dir = outdir / f"fold_{fold}"
-        fold_dir.mkdir(parents=True, exist_ok=True)
-        # Write stats.json
-        (fold_dir / "stats.json").write_text(json.dumps(stats_out, indent=2), encoding="utf-8")
-        # Write trades.csv
-        import pandas as pd  # local import; stdlib allowed
-        trades_df = pd.DataFrame(trades, columns=["side", "entry_ts", "exit_ts", "entry", "exit", "R"])
-        trades_df.to_csv(fold_dir / "trades.csv", index=False)
-
-    return all_stats
+    pd.DataFrame(results).to_csv(outroot / "walkforward" / "fold_stats.csv", index=False)
+    return results

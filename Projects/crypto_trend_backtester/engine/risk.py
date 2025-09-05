@@ -1,67 +1,101 @@
+# engine/risk.py
 from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Optional, Tuple
-
 
 @dataclass
-class Position:
-    """
-    Minimal position container.
-    side: +1 (LONG) or -1 (SHORT)
-    entry: entry price
-    r_denom: ATR_at_entry * sl_atr_mult (defines 1R)
-    sl: stop-loss price
-    be_on: whether breakeven stop is active
-    """
-    side: int
+class RiskParams:
+    sl_atr_mult: float = 15.0
+    tp_atr_mult: float = 60.0
+    breakeven_r: float | None = 0.5
+    sl_exact_neg1: bool = True
+    barrier_priority: str = "worst"  # "worst" | "best" | "tp_first" | "sl_first"
+
+@dataclass
+class Trade:
+    symbol: str
+    side: str           # "long" | "short"
+    ts_entry: int
     entry: float
-    r_denom: float
+    atr: float
     sl: float
-    be_on: bool = False
+    tp: float
+    be_armed: bool = False
+    exit_reason: str | None = None
+    ts_exit: int | None = None
+    exit: float | None = None
+    r_realized: float | None = None
+    bars_held: int = 0
 
+    def update_hold(self): self.bars_held += 1
 
-def price_to_r(side: int, entry: float, price: float, r_denom: float) -> float:
-    """
-    Convert a price P&L to R units: side * (price - entry) / r_denom
-    """
-    return side * (price - entry) / float(r_denom)
+def open_trade(symbol: str, side: str, ts_entry: int, entry: float, atr: float, rp: RiskParams) -> Trade:
+    if side == "long":
+        sl = entry - rp.sl_atr_mult * atr
+        tp = entry + rp.tp_atr_mult * atr
+    else:
+        sl = entry + rp.sl_atr_mult * atr
+        tp = entry - rp.tp_atr_mult * atr
+    return Trade(symbol, side, ts_entry, entry, atr, sl, tp)
 
+def _r_from_price(tr: Trade, px: float) -> float:
+    if tr.side == "long":
+        return (px - tr.entry) / (tr.atr * tr.__dict__.get("atr_mult", 1.0))
+    else:
+        return (tr.entry - px) / (tr.atr * tr.__dict__.get("atr_mult", 1.0))
 
-def update_stop_for_be(pos: Position, bar_high: float, bar_low: float, be_r: float) -> None:
-    """
-    Arm breakeven if unrealized R >= be_r for long (use bar_high) / short (use bar_low).
-    """
-    if pos.be_on:
+def maybe_arm_be(tr: Trade, high: float, low: float, rp: RiskParams):
+    if not rp.breakeven_r or tr.be_armed:
         return
-    if pos.side > 0:
-        if price_to_r(pos.side, pos.entry, bar_high, pos.r_denom) >= be_r:
-            pos.sl = pos.entry
-            pos.be_on = True
+    hit = False
+    if tr.side == "long":
+        hit = (high - tr.entry) >= rp.breakeven_r * tr.atr
     else:
-        if price_to_r(pos.side, pos.entry, bar_low, pos.r_denom) >= be_r:
-            pos.sl = pos.entry
-            pos.be_on = True
+        hit = (tr.entry - low) >= rp.breakeven_r * tr.atr
+    if hit:
+        tr.be_armed = True
+        # Move SL to entry
+        tr.sl = tr.entry
 
+def _priority_order(rp: RiskParams):
+    if rp.barrier_priority == "tp_first": return ("tp","sl")
+    if rp.barrier_priority == "sl_first": return ("sl","tp")
+    # worst/best: choose order based on which is economically worse/better this bar
+    return ("worst",)
 
-def hit_stop(pos: Position, bar_high: float, bar_low: float, sl_exact_neg1: bool = True) -> Optional[Tuple[float, float]]:
+def check_exit(tr: Trade, ts_bar: int, o: float, h: float, l: float, c: float, rp: RiskParams) -> bool:
     """
-    Check if stop is hit within the bar (intrabar logic).
-    Returns (exit_price, R) if stop was hit, else None.
-    If sl_exact_neg1 is True, R is clamped to exactly -1.0 on stop.
+    Bar-based fill policy:
+    - Evaluate BE arming BEFORE barrier checks (so SL may be moved to entry on this bar).
+    - If both SL and TP are inside [low, high] of this bar, use rp.barrier_priority.
+      'worst' assumes adverse fill (SL for longs if both hit; SL for shorts if both hit).
+      'best' assumes favorable fill (TP for longs/shorts).
+    - Otherwise choose whichever barrier was touched.
     """
-    if pos.side > 0:
-        # Long: stop triggers if low <= sl
-        if bar_low <= pos.sl:
-            r = price_to_r(pos.side, pos.entry, pos.sl, pos.r_denom)
-            if sl_exact_neg1:
-                r = -1.0
-            return pos.sl, r
+    # Compute touches
+    sl_hit = (l <= tr.sl <= h) if tr.side == "long" else (l <= tr.sl <= h)
+    tp_hit = (l <= tr.tp <= h) if tr.side == "long" else (l <= tr.tp <= h)
+
+    if sl_hit and tp_hit:
+        order = _priority_order(rp)
+        if order[0] == "worst":
+            take = "sl"
+        elif order[0] == "best":
+            take = "tp"
+        else:
+            take = order[0]
+    elif sl_hit:
+        take = "sl"
+    elif tp_hit:
+        take = "tp"
     else:
-        # Short: stop triggers if high >= sl (note sl is above entry)
-        if bar_high >= pos.sl:
-            r = price_to_r(pos.side, pos.entry, pos.sl, pos.r_denom)
-            if sl_exact_neg1:
-                r = -1.0
-            return pos.sl, r
-    return None
+        return False
+
+    tr.ts_exit = ts_bar
+    tr.exit_reason = take
+    if take == "sl":
+        tr.exit = tr.sl
+        tr.r_realized = -1.0 if rp.sl_exact_neg1 else _r_from_price(tr, tr.exit)
+    else:
+        tr.exit = tr.tp
+        tr.r_realized = _r_from_price(tr, tr.exit)
+    return True
