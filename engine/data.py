@@ -61,16 +61,23 @@ def _read_csv_try_header(path: Path) -> pd.DataFrame:
     return df
 
 def _parse_epoch_to_ms(series: pd.Series) -> np.ndarray:
-    """Return epoch in **milliseconds** as int64 from s/ms/us inputs."""
+    """
+    Convert epoch timestamps to **milliseconds** as int64.
+    Auto-detects seconds / milliseconds / microseconds.
+    Avoids deprecated .view() and datetime conversions.
+    """
     v = pd.to_numeric(series, errors="coerce")
-    med = v.dropna().median()
-    if med > 1e14:      # microseconds
-        dt = pd.to_datetime(v, unit="us", utc=True, errors="coerce")
-    elif med > 1e11:    # milliseconds
-        dt = pd.to_datetime(v, unit="ms", utc=True, errors="coerce")
-    else:               # seconds
-        dt = pd.to_datetime(v, unit="s",  utc=True, errors="coerce")
-    return (dt.view("int64") // 1_000_000).astype(np.int64)
+    med = np.nanmedian(v)
+
+    if med > 1e14:      # microseconds → ms
+        ms = (v // 1_000)
+    elif med > 1e11:    # milliseconds → ms
+        ms = v
+    else:               # seconds → ms
+        ms = (v * 1_000)
+
+    # ensure integer int64
+    return pd.Series(ms).fillna(0).astype("int64").to_numpy()
 
 def _standardize(df: pd.DataFrame, src: Path) -> pd.DataFrame:
     cols = [c.strip().lower() for c in df.columns]
