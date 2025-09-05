@@ -1,0 +1,42 @@
+seed: 42
+
+paths:
+  inputs_dir: "inputs"
+  outputs_dir: "outputs"
+
+symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+data:
+  # Months you actually have (edit freely)
+  months: ["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07","2025-08"]
+
+features:
+  atr_window: 50
+  donchian_lookback: 55
+
+regime:
+  macro_window: 240
+  macro_tmin: 2.0
+  cooldown_bars_after_flip: 15
+
+micro:
+  short_window: 30
+  long_window: 90
+  tmin: 1.5
+  accel_min: 0.5
+
+entry:
+  atr_buffer_mult: 0.20
+  enter_on_next_bar: true
+
+risk:
+  sl_atr_mult: 15.0
+  tp_atr_mult: 60.0           # NEW — enable TP as ATR multiple
+  breakeven_r: 0.50           # set 0/null to disable BE
+  sl_exact_neg1: true
+  barrier_priority: "worst"   # "worst" (default) | "best" | "tp_first" | "sl_first"
+
+walkforward:
+  train_months: 3
+  test_months: 1
+  step_months: 1

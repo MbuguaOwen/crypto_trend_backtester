@@ -1,0 +1,99 @@
+# ---------------------------
+# OS junk
+# ---------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---------------------------
+# Python bytecode / caches
+# ---------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.cache/
+
+# ---------------------------
+# Virtual environments
+# ---------------------------
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.python-version
+
+# ---------------------------
+# Packaging / build artifacts
+# ---------------------------
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+MANIFEST
+
+# ---------------------------
+# Logs / temp
+# ---------------------------
+logs/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.pid
+
+# ---------------------------
+# Editors / IDEs
+# ---------------------------
+.vscode/
+.idea/
+*.iml
+*.sublime-project
+*.sublime-workspace
+
+# ---------------------------
+# Notebooks
+# ---------------------------
+.ipynb_checkpoints/
+
+# ---------------------------
+# Project data & outputs
+# (keep placeholders)
+# ---------------------------
+inputs/
+  BTCUSDT/
+  ETHUSDT/
+  SOLUSDT/
+
+!data/**/.gitkeep
+
+results/
+!results/.gitkeep
+
+# ---------------------------
+# Configs (keep main config)
+# ---------------------------
+*.env
+.env*
+.envrc
+
+
+# ---------------------------
+# Archives
+# ---------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
