@@ -22,17 +22,22 @@ regime:
 micro:
   short_window: 30
   long_window: 90
-  tmin: 1.5
-  accel_min: 0.5
+  tmin: 1.7          # ↑ slightly stricter
+  accel_min: 0.7     # ↑ require more acceleration
 
 entry:
-  atr_buffer_mult: 0.20
-  enter_on_next_bar: true
+  atr_buffer_mult: 0.12      # ↓ was 0.20 (easier to trigger but still buffered)
+  min_body_atr_mult: 0.25    # NEW: candle body ≥ 0.25×ATR at breakout
+  flat_cooldown_bars: 10     # NEW: wait after any exit
+
+filters:
+  atr_pctile_window: 720     # ~12h percentile window on 1m bars
+  atr_pctile_min: 40         # trade only when ATR% is above 40th pct
 
 risk:
   sl_atr_mult: 15.0
-  tp_atr_mult: 60.0           # NEW — enable TP as ATR multiple
-  breakeven_r: 0.50           # set 0/null to disable BE
+  tp_atr_mult: 30.0          # ↓ was 60.0: easier TP → higher hit rate
+  breakeven_r: 0.35          # arm BE a bit earlier
   sl_exact_neg1: true
   barrier_priority: "worst"   # "worst" (default) | "best" | "tp_first" | "sl_first"
 

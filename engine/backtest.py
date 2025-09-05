@@ -8,43 +8,55 @@ from tqdm import tqdm
 from . import signals
 from .risk import RiskParams, open_trade, maybe_arm_be, check_exit
 
+
 def run_insample(df: pd.DataFrame, symbol: str, cfg: dict, outdir: Path):
     df = signals.compute_features(df.copy(), cfg)
     rp = RiskParams(**cfg["risk"])
 
     trades = []
     tr = None
-    warmup = max(cfg["features"]["atr_window"], cfg["regime"]["macro_window"], cfg["micro"]["long_window"], cfg["features"]["donchian_lookback"]) + 2
+    flat_cd = 0
+    warmup = max(
+        cfg["features"]["atr_window"],
+        cfg["regime"]["macro_window"],
+        cfg["micro"]["long_window"],
+        cfg["features"]["donchian_lookback"],
+        cfg["filters"]["atr_pctile_window"],
+    ) + 2
 
     for i in tqdm(range(warmup, len(df)), desc=f"{symbol}", leave=False):
-        row_prev = df.iloc[i-1]
+        row_prev = df.iloc[i - 1]
         row = df.iloc[i]
         ts = int(row["timestamp"])
 
+        # manage open position
         if tr is not None:
-            # BE arm first (uses this bar's high/low)
             maybe_arm_be(tr, row["high"], row["low"], rp)
-            # Exit check (this bar)
             if check_exit(tr, ts, row["open"], row["high"], row["low"], row["close"], rp):
                 trades.append(tr.__dict__)
                 tr = None
+                flat_cd = int(cfg["entry"].get("flat_cooldown_bars", 0))
             else:
                 tr.update_hold()
+                continue  # don’t look for new entries if we’re in a trade
 
-        if tr is None:
-            side = signals.entry_signal(row_prev, cfg)
-            if side:
-                # next-bar entry at this bar's open; ATR from prev bar
-                atr = float(row_prev["atr"])
-                if pd.notna(atr) and atr > 0:
-                    tr = open_trade(symbol, side, ts, float(row["open"]), atr, rp)
+        # flat cooldown
+        if flat_cd > 0:
+            flat_cd -= 1
+            continue
 
-    # If still open at end, force close at last close (book R mark-to-market)
+        # new entry (next-bar open; ATR from prev bar)
+        side = signals.entry_signal(row_prev, cfg)
+        if side:
+            atr = float(row_prev["atr"])
+            if pd.notna(atr) and atr > 0:
+                tr = open_trade(symbol, side, ts, float(row["open"]), atr, rp)
+
+    # Force close remaining
     if tr is not None:
         tr.exit_reason = "eod"
         tr.ts_exit = int(df.iloc[-1]["timestamp"])
         tr.exit = float(df.iloc[-1]["close"])
-        # conservative: compute R vs SL distance
         if tr.side == "long":
             tr.r_realized = (tr.exit - tr.entry) / (tr.atr)
         else:
@@ -54,7 +66,6 @@ def run_insample(df: pd.DataFrame, symbol: str, cfg: dict, outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(trades).to_csv(outdir / "trades.csv", index=False)
 
-    # stats
     r = pd.Series([t["r_realized"] for t in trades if t["r_realized"] is not None])
     stats = {
         "symbol": symbol,
@@ -65,3 +76,4 @@ def run_insample(df: pd.DataFrame, symbol: str, cfg: dict, outdir: Path):
     }
     (outdir / "stats.json").write_text(json.dumps(stats, indent=2))
     return stats
+
