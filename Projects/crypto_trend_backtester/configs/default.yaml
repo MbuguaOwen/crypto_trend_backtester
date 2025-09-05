@@ -1,0 +1,42 @@
+# Minimal, statistical trend-following engine (deterministic)
+paths:
+  inputs_dir: "inputs"
+  outputs_dir: "outputs"
+
+symbols: ["BTCUSDT"]
+
+data:
+  months: ["2025-01","2025-02","2025-03","2025-04","2025-05","2025-06","2025-07"]
+  tz: "UTC"  # all data treated as UTC
+
+features:
+  atr_window: 50
+  donchian_lookback: 20
+
+regime:
+  macro_window: 240          # bars (1m bars by default)
+  macro_tmin: 2.0
+  cooldown_bars_after_flip: 20
+
+micro:
+  short_window: 20
+  long_window: 60
+  tmin: 1.5
+  accel_min: 0.5
+
+entry:
+  atr_buffer_mult: 0.2
+  enter_on_next_bar: true
+
+risk:
+  sl_atr_mult: 8.0
+  breakeven_r: 0.8
+  frictionless: true
+  sl_exact_neg1: true
+
+walkforward:
+  train_months: 3
+  test_months: 1
+  step_months: 1
+
+seed: 42
